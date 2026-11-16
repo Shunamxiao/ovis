@@ -246,8 +246,9 @@ export function TerminalViewportTools({ viewportIntent, terminal, paneId, pageSc
       }
       // metrics that output has overtaken and that are older than the busy cadence (the follow pace reads
       // them up to 2 s apart): the program may have entered its alternate screen since, so read before
-      // choosing herdr's scroll over the program's page keys
-      if (!fresh && validScroll(metrics) && metricsOutput !== outputVersion && Date.now() - metricsAt > SCROLL_POLL_BUSY_MS) {
+      // choosing herdr's scroll over the program's page keys. Not while a write of this view is in flight: its answer
+      // brings fresh metrics, and a page held then waits for a read that the next pages' writes keep from starting
+      if (!fresh && previewRef.current === null && validScroll(metrics) && metricsOutput !== outputVersion && Date.now() - metricsAt > SCROLL_POLL_BUSY_MS) {
         holdPage(direction, false); return;
       }
       if (validScroll(metrics)) writeRef.current((previewRef.current ?? metrics.offset_from_bottom) - direction * pageScrollDistance(metrics.viewport_rows, 1, PAGE_OVERLAP_ROWS));
@@ -260,7 +261,9 @@ export function TerminalViewportTools({ viewportIntent, terminal, paneId, pageSc
     const scrollLines = (lines: number, fresh = false) => {
       if (!interactive || !alive || viewportIntent.isSearching() || !showing()) return;
       const metrics = scrollRef.current;
-      const stale = !fresh && metricsOutput !== outputVersion && Date.now() - metricsAt > SCROLL_POLL_BUSY_MS;
+      // a write of this view in flight brings fresh metrics back itself, so a line goes onto its target: held, it could
+      // only be released by a read, and reads wait while the wheel keeps writing, so the hold expired and the lines were lost
+      const stale = !fresh && previewRef.current === null && metricsOutput !== outputVersion && Date.now() - metricsAt > SCROLL_POLL_BUSY_MS;
       if (validScroll(metrics) && !stale) writeRef.current((previewRef.current ?? metrics.offset_from_bottom) + lines);
       else {
         heldLines = { lines: (heldLines && Date.now() - heldLines.at < HELD_PAGE_MS ? heldLines.lines : 0) + lines, at: Date.now() };
