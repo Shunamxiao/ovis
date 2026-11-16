@@ -44,7 +44,7 @@ export function TerminalViewportTools({ viewportIntent, terminal, paneId, pageSc
   const searchRef = useRef(search); searchRef.current = search;
   const errorRef = useRef(onError); errorRef.current = onError;
   const refreshRef = useRef<() => void>(() => {});
-  const writeRef = useRef<(offset: number) => void>(() => {});
+  const writeRef = useRef<(offset: number, step?: { held: boolean; page: number }) => void>(() => {});
   // Old bridges ignore unknown request fields and would scroll on an automatic search.
   // Only a new explicit result advertises the no-jump range response contract.
   const query = interactive && search && Array.isArray(search.result.matches) && search.result.scroll !== undefined ? search.query : "";
@@ -78,6 +78,11 @@ export function TerminalViewportTools({ viewportIntent, terminal, paneId, pageSc
     // zero-history metrics, so they run only on metrics read after the latest output
     let heldPage: { steps: number; at: number; strict: boolean } | null = null;
     let heldLines: { lines: number; at: number } | null = null;
+    // steps stale metrics would have held for a read, put onto a write in flight instead (pages: their sum, signed like
+    // a direction; cut: lines the cached top took off): `queued` rides with `desired`, `sent` with the write that took
+    // it, until that write's answer settles them
+    let queued = { pages: 0, cut: 0 }, sent = { pages: 0, cut: 0 };
+    const forget = () => { queued = { pages: 0, cut: 0 }; sent = { pages: 0, cut: 0 }; };
     let data: PaneFindResponse | null = null;
     let lastKey = "";
     const showing = () => document.visibilityState !== "hidden" && !!terminal.element?.getClientRects().length
@@ -201,7 +206,7 @@ export function TerminalViewportTools({ viewportIntent, terminal, paneId, pageSc
     const flush = async () => {
       if (writing || desired === null || !alive || viewportIntent.isSearching()) return;
       writing = true;
-      const target = desired; desired = null;
+      const target = desired; desired = null; sent = queued; queued = { pages: 0, cut: 0 };
       version++;
       clearHits();
       try {
@@ -210,10 +215,14 @@ export function TerminalViewportTools({ viewportIntent, terminal, paneId, pageSc
         const request = viewportIntent.scroll(() => api.scrollPane(paneId, target));
         if (!request) return;
         const metrics = await request;
-        if (alive && validScroll(metrics)) { scrollRef.current = metrics; metricsOutput = output; metricsAt = startedAt; setScroll(metrics); }
+        if (alive && validScroll(metrics)) {
+          const grown = metrics.max_offset_from_bottom - (scrollRef.current?.max_offset_from_bottom ?? metrics.max_offset_from_bottom);
+          scrollRef.current = metrics; metricsOutput = output; metricsAt = startedAt; setScroll(metrics);
+          settle(metrics, grown);
+        }
       } catch (cause) {
         if (alive) {
-          desired = null;
+          desired = null; forget();
           errorRef.current(t("Scroll failed: {reason}", { reason: cause instanceof ApiError ? cause.detail : cause instanceof Error ? cause.message : String(cause) }));
         }
       } finally {
@@ -224,9 +233,25 @@ export function TerminalViewportTools({ viewportIntent, terminal, paneId, pageSc
         }
       }
     };
-    writeRef.current = (offset) => {
+    /** A write's answer settles the steps it and the queued target carry as the read they skipped would have: on zero
+     * history the pages go to the program after a read, and history grown since gives back what its old top cut off. */
+    const settle = (metrics: PaneScrollInfo, grown: number) => {
+      const pages = sent.pages + queued.pages, cut = sent.cut + queued.cut;
+      sent = { pages: 0, cut: 0 }; queued.cut = 0;
+      if (pages !== 0 && metrics.max_offset_from_bottom === 0) {
+        desired = null; queued = { pages: 0, cut: 0 };
+        for (let step = 0; step < Math.abs(pages); step++) holdPage(pages > 0 ? 1 : -1, true);
+      } else if (cut > 0 && grown > 0) {
+        const base = desired ?? metrics.offset_from_bottom;
+        desired = previewRef.current = Math.min(metrics.max_offset_from_bottom, base + Math.min(cut, grown));
+      }
+    };
+    writeRef.current = (offset, step) => {
       const metrics = scrollRef.current;
       if (!interactive || !alive || viewportIntent.isSearching() || !validScroll(metrics) || !showing()) return;
+      // a step joins the queued target; any other write replaces it, and the steps it carried with it
+      if (!step) forget();
+      else if (step.held) { queued.pages += step.page; queued.cut += Math.max(0, Math.round(offset) - metrics.max_offset_from_bottom); }
       desired = Math.max(0, Math.min(metrics.max_offset_from_bottom, Math.round(offset)));
       // herdr paints the moved view as output: libghostty's layer tells it apart from new lines (ghostty/overlay.ts)
       terminal.element?.dispatchEvent(new Event(VIEW_MOVED_EVENT, { bubbles: true }));
@@ -248,10 +273,9 @@ export function TerminalViewportTools({ viewportIntent, terminal, paneId, pageSc
       // them up to 2 s apart): the program may have entered its alternate screen since, so read before
       // choosing herdr's scroll over the program's page keys. Not while a write of this view is in flight: its answer
       // brings fresh metrics, and a page held then waits for a read that the next pages' writes keep from starting
-      if (!fresh && previewRef.current === null && validScroll(metrics) && metricsOutput !== outputVersion && Date.now() - metricsAt > SCROLL_POLL_BUSY_MS) {
-        holdPage(direction, false); return;
-      }
-      if (validScroll(metrics)) writeRef.current((previewRef.current ?? metrics.offset_from_bottom) - direction * pageScrollDistance(metrics.viewport_rows, 1, PAGE_OVERLAP_ROWS));
+      const held = !fresh && validScroll(metrics) && metricsOutput !== outputVersion && Date.now() - metricsAt > SCROLL_POLL_BUSY_MS;
+      if (held && previewRef.current === null) { holdPage(direction, false); return; }
+      if (validScroll(metrics)) writeRef.current((previewRef.current ?? metrics.offset_from_bottom) - direction * pageScrollDistance(metrics.viewport_rows, 1, PAGE_OVERLAP_ROWS), { held, page: direction });
       // no metrics (a failed read): ask for a fresh read now rather than at the next poll
       else { dirty = true; idle = 0; schedule(0); }
     };
@@ -263,8 +287,8 @@ export function TerminalViewportTools({ viewportIntent, terminal, paneId, pageSc
       const metrics = scrollRef.current;
       // a write of this view in flight brings fresh metrics back itself, so a line goes onto its target: held, it could
       // only be released by a read, and reads wait while the wheel keeps writing, so the hold expired and the lines were lost
-      const stale = !fresh && previewRef.current === null && metricsOutput !== outputVersion && Date.now() - metricsAt > SCROLL_POLL_BUSY_MS;
-      if (validScroll(metrics) && !stale) writeRef.current((previewRef.current ?? metrics.offset_from_bottom) + lines);
+      const held = !fresh && metricsOutput !== outputVersion && Date.now() - metricsAt > SCROLL_POLL_BUSY_MS;
+      if (validScroll(metrics) && !(held && previewRef.current === null)) writeRef.current((previewRef.current ?? metrics.offset_from_bottom) + lines, { held, page: 0 });
       else {
         heldLines = { lines: (heldLines && Date.now() - heldLines.at < HELD_PAGE_MS ? heldLines.lines : 0) + lines, at: Date.now() };
         dirty = true; idle = 0; schedule(0);
@@ -272,7 +296,7 @@ export function TerminalViewportTools({ viewportIntent, terminal, paneId, pageSc
     };
     if (lineScroll) lineScroll.current = scrollLines;
     const unregisterCancellation = viewportIntent.registerScrollCancellation(() => {
-      desired = null; heldLines = null; heldPage = null; version++;
+      desired = null; heldLines = null; heldPage = null; version++; forget();
       previewRef.current = null;
       clearHits();
     });

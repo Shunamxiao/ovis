@@ -9,16 +9,21 @@ import { SCROLL_POLL_BUSY_MS } from "../lib/terminalViewport.ts";
 import { ViewportIntentGate } from "../lib/viewportIntent.ts";
 import { TerminalViewportTools } from "./TerminalViewportTools.tsx";
 
-/** herdr's side of the view: every metrics read and scroll write waits until the test answers it */
+/** herdr's side of the view: every metrics read and scroll write waits until the test answers it, and is answered
+ * from herdr's state at that moment (a program on its alternate screen leaves no history: offset and maximum 0) */
 function fakeHerdr(max: number) {
-  let offset = 0;
+  let offset = 0, alternate = false;
   const reads: ((metrics: PaneScrollInfo) => void)[] = [];
   const writes: { target: number; resolve: (metrics: PaneScrollInfo) => void }[] = [];
   const targets: number[] = [];
-  const metrics = (): PaneScrollInfo => ({ offset_from_bottom: offset, max_offset_from_bottom: max, viewport_rows: 24 });
+  const metrics = (): PaneScrollInfo => alternate
+    ? { offset_from_bottom: 0, max_offset_from_bottom: 0, viewport_rows: 24 }
+    : { offset_from_bottom: offset, max_offset_from_bottom: max, viewport_rows: 24 };
   return {
     get offset() { return offset; },
     targets,
+    enterAlternateScreen() { alternate = true; },
+    growHistory(lines: number) { max += lines; },
     api: {
       fetchPaneScroll: () => new Promise<PaneScrollInfo>((resolve) => { reads.push(resolve); }),
       scrollPane: (_pane: string, target: number) => {
@@ -30,7 +35,7 @@ function fakeHerdr(max: number) {
     answerWrite() {
       const write = writes.shift();
       if (!write) throw new Error("no scroll write is waiting");
-      offset = Math.max(0, Math.min(max, write.target));
+      if (!alternate) offset = Math.max(0, Math.min(max, write.target));
       write.resolve(metrics());
     },
     answerReads() { for (const resolve of reads.splice(0)) resolve(metrics()); },
@@ -79,23 +84,37 @@ describe("history scrolls by every wheel line and page while the view's own writ
     const lineScroll: { current: ((lines: number) => void) | null } = { current: null };
     const pageScroll: { current: ((direction: -1 | 1) => void) | null } = { current: null };
     const errors: string[] = [];
+    const programPages: number[] = [];
     await act(async () => {
       renderer = create(createElement(TerminalViewportTools, {
         viewportIntent: new ViewportIntentGate(), terminal, paneId: "w1:p1", lineScroll, pageScroll,
+        onApplicationPage: (direction: -1 | 1) => { programPages.push(direction); },
         enabled: true, interactive: true, search: null, onError: (message: string) => { errors.push(message); },
       }));
     });
     const start = Date.now();
+    const at = (ms: number) => act(async () => { jest.advanceTimersByTime(start + ms - Date.now()); });
     return {
       errors,
+      /** page keys the view handed to the program on its alternate screen */
+      programPages,
       /** moves the clock to `ms` after mounting, running the poll timers due on the way */
-      at: (ms: number) => act(async () => { jest.advanceTimersByTime(start + ms - Date.now()); }),
+      at,
       wheel: (lines: number) => act(async () => { lineScroll.current!(lines); }),
       page: (direction: -1 | 1) => act(async () => { pageScroll.current!(direction); }),
       /** a chunk of output parsed, as herdr's repaint of a moved view arrives */
       output: () => act(async () => { for (const callback of written) callback(); }),
       answerWrite: () => act(async () => { herdr.answerWrite(); }),
       answerReads: () => act(async () => { herdr.answerReads(); }),
+      /** answers every read and write as they come, through `until` ms after mounting */
+      async answerAll(until: number) {
+        while (herdr.writing()) await act(async () => { herdr.answerWrite(); });
+        for (let ms = Date.now() - start + 100; ms <= until; ms += 100) {
+          await at(ms);
+          await act(async () => { herdr.answerReads(); });
+          while (herdr.writing()) await act(async () => { herdr.answerWrite(); });
+        }
+      },
     };
   }
 
@@ -151,5 +170,94 @@ describe("history scrolls by every wheel line and page while the view's own writ
     const distance = herdr.targets[0]!;
     expect(herdr.offset).toBe(pages * distance);
     expect(view.errors).toEqual([]);
+  });
+
+  it("gives a page key pressed during a write to the program when that write's answer shows its alternate screen", async () => {
+    const herdr = fakeHerdr(300);
+    const view = await mount(herdr);
+    await view.answerReads();
+    // Given: a page's write in flight, then the program entering its alternate screen
+    await view.at(10);
+    await view.page(-1);
+    await view.output();
+    await view.at(200);
+    herdr.enterAlternateScreen();
+    await view.output();
+    // When: a page key past the busy cadence, before that write is answered with no history
+    await view.at(300);
+    await view.page(-1);
+    await view.answerAll(3000);
+    // Then: the key went to the program after a read, not to herdr as one more scroll
+    expect(herdr.targets).toEqual([herdr.targets[0]!]);
+    expect(view.programPages).toEqual([-1]);
+  });
+
+  it("gives the program the page keys pressed during a write sent before its alternate screen and answered after", async () => {
+    const herdr = fakeHerdr(300);
+    const view = await mount(herdr);
+    await view.answerReads();
+    await view.at(10);
+    await view.page(-1);
+    await view.output();
+    await view.at(50);
+    await view.page(-1);
+    // Given: the first write answered with history, the second out when the program enters its alternate screen
+    await view.at(100);
+    await view.answerWrite();
+    await view.at(150);
+    herdr.enterAlternateScreen();
+    await view.output();
+    // When: two keys during that write, and one more after its answer
+    await view.at(400);
+    await view.page(-1);
+    await view.at(500);
+    await view.page(-1);
+    await view.answerWrite();
+    await view.at(600);
+    await view.page(-1);
+    await view.answerAll(3000);
+    // Then: the program got all three, and herdr no scroll after the switch
+    expect(herdr.targets).toHaveLength(2);
+    expect(view.programPages).toEqual([-1, -1, -1]);
+  });
+
+  it("holds a line and a page on stale metrics while nothing of the view is in flight, until a read", async () => {
+    const herdr = fakeHerdr(300);
+    const view = await mount(herdr);
+    await view.answerReads();
+    // Given: output since the metrics were read, and no write out
+    await view.output();
+    // When: a line and a page past the busy cadence
+    await view.at(10 + SCROLL_POLL_BUSY_MS + 40);
+    await view.wheel(3);
+    await view.page(-1);
+    await view.at(10 + SCROLL_POLL_BUSY_MS + 50);
+    // Then: nothing is written before a read answers, and both apply after it
+    expect(herdr.targets).toEqual([]);
+    await view.answerAll(3000);
+    const distance = herdr.targets[0]!;
+    expect(herdr.offset).toBe(distance + 3);
+    expect(view.programPages).toEqual([]);
+  });
+
+  it("gives back the lines the cached top cut off once the write's answer shows the history grew", async () => {
+    const herdr = fakeHerdr(100);
+    const view = await mount(herdr);
+    await view.answerReads();
+    // Given: a write in flight near the top, and the history growing by 20 lines meanwhile
+    await view.at(10);
+    await view.wheel(99);
+    await view.at(100);
+    herdr.growHistory(20);
+    await view.output();
+    // When: five lines up past the busy cadence, above the top the view last read
+    await view.at(10 + SCROLL_POLL_BUSY_MS + 40);
+    await view.wheel(5);
+    await view.answerAll(3000);
+    // Then: all five apply on the grown history, and the wheel goes on from there
+    expect(herdr.offset).toBe(104);
+    await view.wheel(3);
+    await view.answerAll(4000);
+    expect(herdr.offset).toBe(107);
   });
 });
