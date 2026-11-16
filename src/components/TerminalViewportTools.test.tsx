@@ -8,17 +8,39 @@ import * as settingsModule from "../lib/settings.ts";
 import { SCROLL_POLL_BUSY_MS } from "../lib/terminalViewport.ts";
 import { ViewportIntentGate } from "../lib/viewportIntent.ts";
 import { TerminalViewportTools } from "./TerminalViewportTools.tsx";
+import ORDERS from "./TerminalViewportTools.orders.json";
+
+/** herdr's side as a step may set it: its view, its history, a program's alternate screen */
+type HerdrState = { offset?: number; max?: number; alternateScreen?: boolean };
+/** where this view wrote, where herdr's view ended, and the page keys the program received as `direction@ms` */
+type OrderResult = { end: number; writes: number[]; program: string[] };
+type OrderStep = { at: number } & (
+  | { do: "read"; fail?: boolean }
+  | { do: "wheel"; lines: number }
+  | { do: "page"; direction: -1 | 1 }
+  | { do: "output" | "resize" | "jumpToBottom" | "unmount" | "writeIfPending" | "writeAllPending" }
+  | { do: "herdr"; state: HerdrState }
+  | { do: "write"; fail?: boolean; bare?: boolean; moved?: HerdrState }
+  | { do: "settle"; from: number; until: number; every: number }
+  | { do: "settleSecondWrite"; from: number; until: number; every: number; writesFrom: number });
+/** an order of the merge review (TerminalViewportTools.orders.json): `main` is main's result; `known`, this view's where
+ * it still differs, in view movement only */
+type Order = {
+  id: string; title: string; start: Required<HerdrState>; steps: OrderStep[];
+  main: OrderResult; known?: OrderResult & { note: string };
+};
 
 /** herdr's side of the view: every metrics read and scroll write waits until the test answers it, and is answered
  * from herdr's state at that moment (a program on its alternate screen leaves no history: offset and maximum 0) */
 function fakeHerdr(max: number) {
   let offset = 0, alternate = false;
-  const reads: ((metrics: PaneScrollInfo) => void)[] = [];
+  const reads: { resolve: (metrics: PaneScrollInfo) => void; reject: (error: Error) => void }[] = [];
   const writes: { target: number; resolve: (metrics: PaneScrollInfo) => void; reject: (error: Error) => void }[] = [];
   const targets: number[] = [];
   const metrics = (): PaneScrollInfo => alternate
     ? { offset_from_bottom: 0, max_offset_from_bottom: 0, viewport_rows: 24 }
     : { offset_from_bottom: offset, max_offset_from_bottom: max, viewport_rows: 24 };
+  const set = (state: HerdrState) => { offset = state.offset ?? offset; max = state.max ?? max; alternate = state.alternateScreen ?? alternate; };
   const nextWrite = () => {
     const write = writes.shift();
     if (!write) throw new Error("no scroll write is waiting");
@@ -28,24 +50,27 @@ function fakeHerdr(max: number) {
     get offset() { return offset; },
     targets,
     enterAlternateScreen() { alternate = true; },
+    /** herdr's state changes without answering anything (output under a held view, a program switching screens) */
+    set,
     api: {
-      fetchPaneScroll: () => new Promise<PaneScrollInfo>((resolve) => { reads.push(resolve); }),
+      fetchPaneScroll: () => new Promise<PaneScrollInfo>((resolve, reject) => { reads.push({ resolve, reject }); }),
       scrollPane: (_pane: string, target: number) => {
         targets.push(target);
         return new Promise<PaneScrollInfo>((resolve, reject) => { writes.push({ target, resolve, reject }); });
       },
     },
     writing: () => writes.length > 0,
-    /** applies the oldest write; `movedTo`: herdr's view then moves there before the answer (output under a held view);
+    /** applies the oldest write; `moved`: herdr's state then changes so before the answer (output under a held view);
      * null: the answer carries no metrics */
-    answerWrite(movedTo?: number | null) {
+    answerWrite(moved?: HerdrState | null) {
       const write = nextWrite();
       if (!alternate) offset = Math.max(0, Math.min(max, write.target));
-      if (typeof movedTo === "number") offset = movedTo;
-      write.resolve(movedTo === null ? null as unknown as PaneScrollInfo : metrics());
+      if (moved) set(moved);
+      write.resolve(moved === null ? null as unknown as PaneScrollInfo : metrics());
     },
     failWrite() { nextWrite().reject(new Error("herdr refused the scroll")); },
-    answerReads() { for (const resolve of reads.splice(0)) resolve(metrics()); },
+    answerReads() { for (const read of reads.splice(0)) read.resolve(metrics()); },
+    failReads() { for (const read of reads.splice(0)) read.reject(new Error("herdr did not answer")); },
   };
 }
 
@@ -79,7 +104,7 @@ describe("history scrolls by every wheel line while the view's own writes are sl
 
   async function mount(herdr: ReturnType<typeof fakeHerdr>) {
     spyOn(machineContext, "useMachineApi").mockReturnValue(herdr.api as unknown as ReturnType<typeof machineContext.useMachineApi>);
-    const written: (() => void)[] = [];
+    const written: (() => void)[] = [], resized: (() => void)[] = [];
     const listener = () => ({ dispose() {} });
     // the grid and its layer have a size, so the Jump to bottom button is drawn
     const rect = { left: 0, top: 0, right: 800, bottom: 600, width: 800, height: 600 };
@@ -89,25 +114,29 @@ describe("history scrolls by every wheel line while the view's own writes are sl
       cols: 80, rows: 24,
       buffer: { active: { viewportY: 0, baseY: 0, getLine: () => undefined } },
       onWriteParsed: (callback: () => void) => { written.push(callback); return { dispose() {} }; },
-      onScroll: listener, onRender: listener, onResize: listener,
+      onScroll: listener, onRender: listener, onResize: (callback: () => void) => { resized.push(callback); return { dispose() {} }; },
     } as unknown as Terminal;
     const lineScroll: { current: ((lines: number) => void) | null } = { current: null };
     const pageScroll: { current: ((direction: -1 | 1) => void) | null } = { current: null };
     const errors: string[] = [];
-    const programPages: number[] = [];
+    const programPages: number[] = [], programKeys: string[] = [];
+    let start = 0;
     await act(async () => {
       renderer = create(createElement(TerminalViewportTools, {
         viewportIntent: new ViewportIntentGate(), terminal, paneId: "w1:p1", lineScroll, pageScroll,
-        onApplicationPage: (direction: -1 | 1) => { programPages.push(direction); },
+        onApplicationPage: (direction: -1 | 1) => { programPages.push(direction); programKeys.push(`${direction}@${Date.now() - start}`); },
         enabled: true, interactive: true, search: null, onError: (message: string) => { errors.push(message); },
       }), { createNodeMock: () => ({ parentElement: screen }) });
     });
-    const start = Date.now();
-    const at = (ms: number) => act(async () => { jest.advanceTimersByTime(start + ms - Date.now()); });
+    start = Date.now();
+    // a step at the time of the one before moves nothing (a timer of 0 ms has taken the clock 1 ms on)
+    const at = (ms: number) => act(async () => { if (start + ms > Date.now()) jest.advanceTimersByTime(start + ms - Date.now()); });
     return {
       errors,
       /** page keys the view handed to the program on its alternate screen */
       programPages,
+      /** the same, each as `direction@ms after mounting` */
+      programKeys,
       /** moves the clock to `ms` after mounting, running the poll timers due on the way */
       at,
       wheel: (lines: number) => act(async () => { lineScroll.current!(lines); }),
@@ -115,9 +144,13 @@ describe("history scrolls by every wheel line while the view's own writes are sl
       jumpToBottom: () => act(async () => { renderer!.root.findByProps({ "aria-label": "Jump to bottom" }).props.onClick(); }),
       /** a chunk of output parsed, as herdr's repaint of a moved view arrives */
       output: () => act(async () => { for (const callback of written) callback(); }),
-      answerWrite: (movedTo?: number | null) => act(async () => { herdr.answerWrite(movedTo); }),
+      answerWrite: (moved?: HerdrState | null) => act(async () => { herdr.answerWrite(moved); }),
       failWrite: () => act(async () => { herdr.failWrite(); }),
       answerReads: () => act(async () => { herdr.answerReads(); }),
+      failReads: () => act(async () => { herdr.failReads(); }),
+      /** the grid's size changes (a resize while a write is out) */
+      resize: () => act(async () => { for (const callback of resized) callback(); }),
+      unmount: () => act(async () => { renderer?.unmount(); renderer = undefined; }),
       /** answers every read and write as they come, through `until` ms after mounting */
       async answerAll(until: number) {
         while (herdr.writing()) await act(async () => { herdr.answerWrite(); });
@@ -302,7 +335,7 @@ describe("history scrolls by every wheel line while the view's own writes are sl
     const herdr = fakeHerdr(300);
     const view = await wheelAndPageDuringWrite(herdr);
     // When: herdr applied the write to 3, and output moved its view to 12 before it answered
-    await view.answerWrite(12);
+    await view.answerWrite({ offset: 12 });
     await view.answerAll(3000);
     // Then: the page from 12, then the one queued line up: 12 + 23 + 3, never back down
     expect(herdr.targets).toEqual([3, 35, 38]);
@@ -318,4 +351,58 @@ describe("history scrolls by every wheel line while the view's own writes are sl
     // Then: the first write's lines are not applied again: 3 + 23 + 3
     expect(herdr.offset).toBe(29);
   });
+
+  /** one order of the merge review: herdr's state at mount, then timed steps, each at its ms after mounting */
+  async function runOrder(order: Order): Promise<OrderResult> {
+    const herdr = fakeHerdr(order.start.max);
+    herdr.set(order.start);
+    const view = await mount(herdr);
+    const answerWrites = async () => { while (herdr.writing()) await view.answerWrite(); };
+    for (const step of order.steps) {
+      await view.at(step.at);
+      switch (step.do) {
+        case "read": await (step.fail ? view.failReads() : view.answerReads()); break;
+        case "wheel": await view.wheel(step.lines); break;
+        case "page": await view.page(step.direction); break;
+        case "output": await view.output(); break;
+        case "resize": await view.resize(); break;
+        case "jumpToBottom": await view.jumpToBottom(); break;
+        case "unmount": await view.unmount(); break;
+        case "herdr": herdr.set(step.state); break;
+        case "write": await (step.fail ? view.failWrite() : view.answerWrite(step.bare ? null : step.moved)); break;
+        case "writeIfPending": if (herdr.writing()) await view.answerWrite(); break;
+        case "writeAllPending": await answerWrites(); break;
+        // every `every` ms: the reads, then the writes, as they come
+        case "settle":
+          for (let ms = step.from; ms <= step.until; ms += step.every) { await view.at(ms); await view.answerReads(); await answerWrites(); }
+          break;
+        // the next write takes until `writesFrom`: reads are answered meanwhile, writes from then on
+        case "settleSecondWrite":
+          for (let ms = step.from; ms <= step.until; ms += step.every) {
+            await view.at(ms);
+            await view.answerReads();
+            if (ms >= step.writesFrom) await answerWrites();
+          }
+          break;
+      }
+    }
+    return { end: herdr.offset, writes: herdr.targets, program: view.programKeys };
+  }
+
+  for (const order of ORDERS as Order[]) {
+    if (!order.known) {
+      it(`${order.id} as on main: ${order.title}`, async () => {
+        expect(await runOrder(order)).toEqual(order.main);
+      });
+      continue;
+    }
+    const { note, ...known } = order.known;
+    // view movement only, no page key lost, delayed or sent elsewhere: failing against main's result, pinned at its own
+    it.failing(`${order.id} as on main (known failing, ${note}): ${order.title}`, async () => {
+      expect(await runOrder(order)).toEqual(order.main);
+    });
+    it(`${order.id} no further from main than known (${note}): ${order.title}`, async () => {
+      expect(await runOrder(order)).toEqual(known);
+    });
+  }
 });
