@@ -240,4 +240,43 @@ describe("history scrolls by every wheel line while the view's own writes are sl
     expect(herdr.targets).toEqual([23, 46, 0]);
     expect(view.programPages).toEqual([-1]);
   });
+
+  it("gives a page key pressed with a wheel line during a write the page path after a read, though the next write would outlast its hold", async () => {
+    const herdr = fakeHerdr(300);
+    const view = await mount(herdr);
+    await view.answerReads();
+    // Given: a wheel write out, and output since the metrics were read
+    await view.at(10);
+    await view.answerReads();
+    await view.wheel(3);
+    await view.output();
+    // When: a wheel line and a PageUp past the busy cadence, the write answered at 400 ms, and nothing herdr is asked
+    // after that answered before 1100 ms
+    await view.at(10 + SCROLL_POLL_BUSY_MS + 50);
+    await view.wheel(3);
+    await view.page(-1);
+    await view.at(400);
+    await view.answerWrite();
+    await view.at(1100);
+    await view.answerAll(4000);
+    // Then: the page and the line both applied, the page first, as on main
+    expect(herdr.targets).toEqual([3, 26, 29]);
+    expect(herdr.offset).toBe(29);
+  });
+
+  it("applies a wheel line asked on stale metrics during a write that fails, after a read", async () => {
+    const herdr = fakeHerdr(300);
+    const view = await mount(herdr);
+    await view.answerReads();
+    await view.at(10);
+    await view.wheel(3);
+    await view.output();
+    await view.at(10 + SCROLL_POLL_BUSY_MS + 40);
+    await view.wheel(3);
+    await view.failWrite();
+    await view.answerAll(3000);
+    // the failed write's own lines are gone, as on main; the later line applies
+    expect(view.errors).toHaveLength(1);
+    expect(herdr.offset).toBe(3);
+  });
 });

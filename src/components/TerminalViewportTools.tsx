@@ -78,6 +78,9 @@ export function TerminalViewportTools({ viewportIntent, terminal, paneId, pageSc
     // zero-history metrics, so they run only on metrics read after the latest output
     let heldPage: { steps: number; at: number; strict: boolean } | null = null;
     let heldLines: { lines: number; at: number } | null = null;
+    // the queued target holds lines that went past stale metrics onto a write in flight: from such a line until that
+    // target is sent, replaced, or handed back to a hold (a page held meanwhile needs the read the next write would delay)
+    let linesQueued = false;
     let data: PaneFindResponse | null = null;
     let lastKey = "";
     const showing = () => document.visibilityState !== "hidden" && !!terminal.element?.getClientRects().length
@@ -201,7 +204,7 @@ export function TerminalViewportTools({ viewportIntent, terminal, paneId, pageSc
     const flush = async () => {
       if (writing || desired === null || !alive || viewportIntent.isSearching()) return;
       writing = true;
-      const target = desired; desired = null;
+      const target = desired; desired = null; linesQueued = false;
       version++;
       clearHits();
       try {
@@ -213,12 +216,14 @@ export function TerminalViewportTools({ viewportIntent, terminal, paneId, pageSc
         if (alive && validScroll(metrics)) { scrollRef.current = metrics; metricsOutput = output; metricsAt = startedAt; setScroll(metrics); }
       } catch (cause) {
         if (alive) {
+          if (linesQueued && desired !== null) heldLines = { lines: (heldLines && Date.now() - heldLines.at < HELD_PAGE_MS ? heldLines.lines : 0) + desired - target, at: Date.now() };
           desired = null;
           errorRef.current(t("Scroll failed: {reason}", { reason: cause instanceof ApiError ? cause.detail : cause instanceof Error ? cause.message : String(cause) }));
         }
       } finally {
         writing = false;
         if (alive) {
+          if (desired !== null && linesQueued && heldPage && validScroll(scrollRef.current)) { heldLines = { lines: (heldLines && Date.now() - heldLines.at < HELD_PAGE_MS ? heldLines.lines : 0) + desired - scrollRef.current.offset_from_bottom, at: Date.now() }; desired = null; }
           if (desired !== null) void flush();
           else { previewRef.current = null; wake(); }
         }
@@ -227,6 +232,7 @@ export function TerminalViewportTools({ viewportIntent, terminal, paneId, pageSc
     writeRef.current = (offset) => {
       const metrics = scrollRef.current;
       if (!interactive || !alive || viewportIntent.isSearching() || !validScroll(metrics) || !showing()) return;
+      linesQueued = false;
       desired = Math.max(0, Math.min(metrics.max_offset_from_bottom, Math.round(offset)));
       // herdr paints the moved view as output: libghostty's layer tells it apart from new lines (ghostty/overlay.ts)
       terminal.element?.dispatchEvent(new Event(VIEW_MOVED_EVENT, { bubbles: true }));
@@ -262,8 +268,8 @@ export function TerminalViewportTools({ viewportIntent, terminal, paneId, pageSc
       const metrics = scrollRef.current;
       // a write of this view in flight brings fresh metrics back itself, so a line goes onto its target: held, it could
       // only be released by a read, and reads wait while the wheel keeps writing, so the hold expired and the lines were lost
-      const stale = !fresh && previewRef.current === null && metricsOutput !== outputVersion && Date.now() - metricsAt > SCROLL_POLL_BUSY_MS;
-      if (validScroll(metrics) && !stale) writeRef.current((previewRef.current ?? metrics.offset_from_bottom) + lines);
+      const held = !fresh && metricsOutput !== outputVersion && Date.now() - metricsAt > SCROLL_POLL_BUSY_MS;
+      if (validScroll(metrics) && !(held && previewRef.current === null)) { writeRef.current((previewRef.current ?? metrics.offset_from_bottom) + lines); linesQueued = held; }
       else {
         heldLines = { lines: (heldLines && Date.now() - heldLines.at < HELD_PAGE_MS ? heldLines.lines : 0) + lines, at: Date.now() };
         dirty = true; idle = 0; schedule(0);
