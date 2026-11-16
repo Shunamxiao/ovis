@@ -223,7 +223,7 @@ export function TerminalViewportTools({ viewportIntent, terminal, paneId, pageSc
       } finally {
         writing = false;
         if (alive) {
-          if (desired !== null && linesQueued && heldPage && validScroll(scrollRef.current)) { heldLines = { lines: (heldLines && Date.now() - heldLines.at < HELD_PAGE_MS ? heldLines.lines : 0) + desired - scrollRef.current.offset_from_bottom, at: Date.now() }; desired = null; }
+          if (desired !== null && linesQueued && heldPage && validScroll(scrollRef.current)) { heldLines = { lines: (heldLines && Date.now() - heldLines.at < HELD_PAGE_MS ? heldLines.lines : 0) + desired - target, at: Date.now() }; desired = null; }
           if (desired !== null) void flush();
           else { previewRef.current = null; wake(); }
         }

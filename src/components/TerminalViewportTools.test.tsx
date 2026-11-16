@@ -36,10 +36,13 @@ function fakeHerdr(max: number) {
       },
     },
     writing: () => writes.length > 0,
-    answerWrite() {
+    /** applies the oldest write; `movedTo`: herdr's view then moves there before the answer (output under a held view);
+     * null: the answer carries no metrics */
+    answerWrite(movedTo?: number | null) {
       const write = nextWrite();
       if (!alternate) offset = Math.max(0, Math.min(max, write.target));
-      write.resolve(metrics());
+      if (typeof movedTo === "number") offset = movedTo;
+      write.resolve(movedTo === null ? null as unknown as PaneScrollInfo : metrics());
     },
     failWrite() { nextWrite().reject(new Error("herdr refused the scroll")); },
     answerReads() { for (const resolve of reads.splice(0)) resolve(metrics()); },
@@ -112,7 +115,7 @@ describe("history scrolls by every wheel line while the view's own writes are sl
       jumpToBottom: () => act(async () => { renderer!.root.findByProps({ "aria-label": "Jump to bottom" }).props.onClick(); }),
       /** a chunk of output parsed, as herdr's repaint of a moved view arrives */
       output: () => act(async () => { for (const callback of written) callback(); }),
-      answerWrite: () => act(async () => { herdr.answerWrite(); }),
+      answerWrite: (movedTo?: number | null) => act(async () => { herdr.answerWrite(movedTo); }),
       failWrite: () => act(async () => { herdr.failWrite(); }),
       answerReads: () => act(async () => { herdr.answerReads(); }),
       /** answers every read and write as they come, through `until` ms after mounting */
@@ -278,5 +281,41 @@ describe("history scrolls by every wheel line while the view's own writes are sl
     // the failed write's own lines are gone, as on main; the later line applies
     expect(view.errors).toHaveLength(1);
     expect(herdr.offset).toBe(3);
+  });
+
+  /** a wheel write out, output, then a wheel line and a PageUp past the busy cadence: the page is held, the line queued */
+  async function wheelAndPageDuringWrite(herdr: ReturnType<typeof fakeHerdr>) {
+    const view = await mount(herdr);
+    await view.answerReads();
+    await view.at(10);
+    await view.answerReads();
+    await view.wheel(3);
+    await view.output();
+    await view.at(10 + SCROLL_POLL_BUSY_MS + 50);
+    await view.wheel(3);
+    await view.page(-1);
+    await view.at(400);
+    return view;
+  }
+
+  it("counts the line queued with a held page from the target it joined, though herdr's view moved before the answer", async () => {
+    const herdr = fakeHerdr(300);
+    const view = await wheelAndPageDuringWrite(herdr);
+    // When: herdr applied the write to 3, and output moved its view to 12 before it answered
+    await view.answerWrite(12);
+    await view.answerAll(3000);
+    // Then: the page from 12, then the one queued line up: 12 + 23 + 3, never back down
+    expect(herdr.targets).toEqual([3, 35, 38]);
+    expect(herdr.offset).toBe(38);
+  });
+
+  it("counts the line queued with a held page from the target it joined, though the write's answer carries no metrics", async () => {
+    const herdr = fakeHerdr(300);
+    const view = await wheelAndPageDuringWrite(herdr);
+    // When: herdr applied the write to 3 and answered without metrics
+    await view.answerWrite(null);
+    await view.answerAll(3000);
+    // Then: the first write's lines are not applied again: 3 + 23 + 3
+    expect(herdr.offset).toBe(29);
   });
 });
