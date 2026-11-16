@@ -1,3 +1,4 @@
 ### Fixed
-- Under load, a long mouse wheel or a held-down page key in the terminal no longer stops a few lines
-  or pages short of where it was asked and stays there until the next wheel.
+- Under load, a long mouse wheel over the terminal's history on a mirrored pane or while an OmO question is open
+  (and a phone's swipe there) no longer stops a few lines short of where it was asked and stays there until the next
+  wheel.
