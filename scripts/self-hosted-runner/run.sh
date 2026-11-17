@@ -163,7 +163,8 @@ for port in $(seq 41737 41770); do SLOT_FILES+=("$port"); done
 PEER_PREFIX="herdr-ci-${HOST}-"
 # The gate's state, host-wide so that the slot loops of every launcher copy decide one at a time: a
 # lock file and the time this host last started a runner container.
-OFFER_STATE="${OVIS_RUNNER_OFFER_DIR:-${XDG_RUNTIME_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}}/ovis-ci-runner}"
+# Not under XDG_RUNTIME_DIR: a launcher started outside a login session has none, and would decide alone.
+OFFER_STATE="${OVIS_RUNNER_OFFER_DIR:-$HOME/.cache/ovis-ci-runner}"
 OFFER_LOCK="$OFFER_STATE/offer-$HOST.lock"
 OFFER_STAMP="$OFFER_STATE/offer-$HOST.started"
 # /proc/pressure per resource, "some avg10" in percent. The tests point this elsewhere.
@@ -171,6 +172,9 @@ PSI_DIR="${OVIS_RUNNER_PSI_DIR:-/proc/pressure}"
 if [ "$OFFER" = 1 ]; then
   case "$OFFER_POLL" in ''|*[!0-9]*|0) echo "OVIS_RUNNER_OFFER_POLL must be a whole number of seconds from 1" >&2; exit 2 ;; esac
   case "$OFFER_PAUSE" in ''|*[!0-9]*) echo "OVIS_RUNNER_OFFER_PAUSE must be a whole number of seconds" >&2; exit 2 ;; esac
+  for threshold in CPU:"$OFFER_CPU_PSI" MEMORY:"$OFFER_MEMORY_PSI"; do
+    case "${threshold#*:}" in ''|*[!0]*) ;; *) echo "--env-file: CHECK_HOST_OFFER_${threshold%%:*}_PSI must be 1 or more: no pressure is under 0, so 0 would hold every slot" >&2; exit 2 ;; esac
+  done
   if ! command -v flock >/dev/null 2>&1; then
     echo "--offer-when-room: flock (util-linux) is needed to decide between this host's slot loops" >&2
     exit 2
@@ -557,8 +561,22 @@ psi_under() {
 
 # Sets OFFER_HOLD to the reason to wait when this host has no room right now.
 offer_room() {
-  local name slot labels procs youngest="" age value started
+  local name slot labels procs youngest="" age value started claim
   OFFER_HOLD=""
+  # a slot that claimed room and has not started its container yet (token, network): an offer on its way
+  for claim in "$OFFER_STATE/offer-$HOST.claim."*; do
+    [ -f "$claim" ] || continue
+    name="${claim##*.claim.}"
+    [ "$name" = "$1" ] && continue
+    if docker container inspect "$name" >/dev/null 2>&1 || [ -n "$(find "$claim" -mmin +10 2>/dev/null)" ]; then
+      rm -f "$claim"
+      continue
+    fi
+    if [ "$(cat "$claim" 2>/dev/null)" = "$2" ]; then
+      OFFER_HOLD="the slot $name of this pool is starting its runner"
+      return 1
+    fi
+  done
   for name in $(docker ps --filter "name=$PEER_PREFIX" --format '{{.Names}}' 2>/dev/null || true); do
     # <prefix><slot> or a launcher copy's <prefix><word>-<slot> (pr-3, main-1, appb-2)
     slot="${name#"$PEER_PREFIX"}"
@@ -591,6 +609,7 @@ offer_room() {
       ''|*[!0-9]*) ;;
       *)
         age=$(( $(date +%s) - started ))
+        if [ "$age" -lt 0 ]; then age=0; fi
         if [ "$age" -lt "$OFFER_PAUSE" ]; then
           OFFER_HOLD="this host started a runner ${age}s ago, less than ${OFFER_PAUSE}s"
           return 1
@@ -616,7 +635,13 @@ offer_room() {
 
 # Host-wide, so that the next slot's gate sees this start even before the container shows up.
 offer_record() {
-  printf '%s\n' "$(date +%s)" > "$OFFER_STAMP.new.$$" && mv -f "$OFFER_STAMP.new.$$" "$OFFER_STAMP" 2>/dev/null || true
+  printf '%s\n' "$(date +%s)" > "$OFFER_STAMP.new.$$" && mv -f "$OFFER_STAMP.new.$$" "$OFFER_STAMP"
+}
+
+# The slot's claim stays until its container shows up (another slot's gate then removes it) or for ten
+# minutes; the slot removes it itself when it gives up this try.
+offer_claim() {
+  printf '%s\n' "$2" > "$OFFER_STATE/offer-$HOST.claim.$1.new" && mv -f "$OFFER_STATE/offer-$HOST.claim.$1.new" "$OFFER_STATE/offer-$HOST.claim.$1" && offer_record
 }
 
 # Waits for room, then claims it under the host-wide lock and records the start before releasing it.
@@ -625,17 +650,19 @@ offer_wait() {
   while true; do
     if offer_room "$name" "$labels"; then
       claimed=0
-      {
-        # >> and never >: the lock lives in the file's inode, which a truncation keeps
+      # >> and never >: the lock lives in the file's inode, which a truncation keeps. A lock file that
+      # cannot be opened holds the slot instead of ending its loop.
+      if ! {
         if flock -w 60 9; then
           if offer_room "$name" "$labels"; then
-            offer_record
-            claimed=1
+            if offer_claim "$name" "$labels"; then claimed=1; else OFFER_HOLD="the gate cannot write its state in $OFFER_STATE"; fi
           fi
         else
           OFFER_HOLD="another slot of this host has held the gate's lock for 60s"
         fi
-      } 9>>"$OFFER_LOCK"
+      } 2>/dev/null 9>>"$OFFER_LOCK"; then
+        OFFER_HOLD="the gate cannot open its lock $OFFER_LOCK"
+      fi
       if [ "$claimed" = 1 ]; then
         [ -z "$reason" ] || echo "[$name] there is room on this host: starting a runner" >&2
         return 0
@@ -669,6 +696,7 @@ slot_loop() {
     elif ! token="$(gh api -X POST "repos/$REPO/actions/runners/registration-token" --jq .token)"; then problem="could not fetch a registration token"
     fi
     if [ -n "$problem" ]; then
+      rm -f "$OFFER_STATE/offer-$HOST.claim.$name"
       echo "[$name] $problem; retrying in ${delay}s" >&2
       [ "$ONCE" = 1 ] && return 1
       sleep "$delay"
@@ -678,7 +706,7 @@ slot_loop() {
     delay=30
     cache_args
     build_cache_args "$name"
-    [ "$OFFER" = 1 ] && offer_record
+    [ "$OFFER" = 1 ] && { offer_record || true; }
     if printf '%s\n' "$token" | docker run ${PLACE_ARGS[@]+"${PLACE_ARGS[@]}"} --rm -i \
       --name "$name" \
       --network "$name-net" \
@@ -703,6 +731,7 @@ slot_loop() {
       echo "[$name] container exited with status $container_status" >&2
     fi
     token=""
+    rm -f "$OFFER_STATE/offer-$HOST.claim.$name"
     [ "$ONCE" = 1 ] && return "$container_status"
   done
 }
