@@ -418,6 +418,11 @@ describe("reference links", () => {
       expect(drawn("[docs]\n\n[docs]: https://good.example\n[docs]: https://other.example", html))
         .toEqual(["[docs]", "[docs]: <https://good.example->https://good.example>", "[docs]: <https://other.example->https://other.example>"]);
       expect(drawn("[a] [b]\n\n[a]: ssh://h/x\n[c]: https://c.dev", html)).toEqual(["[a] [b]", "[a]: ssh://h/x", "[c]: <https://c.dev->https://c.dev>"]);
+      // a word, a note or an emoji names no file: its line is what the agent said
+      expect(drawn("Results for [build], [test] and [s][^1].\n\n[build]: passed\n[^1]: Wikipedia\n[s]: \u2705", html))
+        .toEqual(["Results for [build], [test] and [s][^1].", "[build]: passed", "[^1]: Wikipedia", "[s]: \u2705"]);
+      // an address in angle brackets is the address
+      expect(drawn("See [a].\n\n[a]: <https://a.dev>", html)).toEqual(["See <a->https://a.dev>."]);
       // a badge's linked picture, whose text holds brackets, stays the text it is, and its definitions with it
       expect(drawn("[![build][badge]][ci]\n\n[badge]: https://x.dev/b.svg\n[ci]: https://ci.dev", html)).toEqual([
         "[![build][badge]][ci]", "[badge]: <https://x.dev/b.svg->https://x.dev/b.svg>", "[ci]: <https://ci.dev->https://ci.dev>",

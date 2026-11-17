@@ -343,7 +343,8 @@ let reading: {
 /**
  * The definitions among `found` that references may resolve to. A label defined twice defines nothing, and neither does
  * a line inside an HTML comment (an earlier `<!--` that no `-->` closed, wherever it is written) or an address that
- * cannot be a link: their lines stay the text they are.
+ * cannot be a link: their lines stay the text they are. A file is named by a path, with a separator or an extension:
+ * `[build]: passed` or `[^1]: Wikipedia` is a note, not a file.
  */
 function definitions(text: string, found: NonNullable<typeof reading>["found"]): Map<string, Definition> {
   const comments: Array<[number, number]> = [];
@@ -359,14 +360,17 @@ function definitions(text: string, found: NonNullable<typeof reading>["found"]):
   for (let at = text.indexOf("\n"); at !== -1; at = text.indexOf("\n", at + 1)) lineStarts.push(at + 1);
   const defined = new Map<string, Definition | null>();
   let comment = 0;
-  for (const { line, text: written } of found) {
+  for (const { line, text: lineText } of found) {
     const start = lineStarts[line]!;
     while (comment < comments.length && comments[comment]![1] <= start) comment += 1;
     if (comment < comments.length && comments[comment]![0] < start) continue;
-    const [, label = "", destination = "", title] = definitionLine.exec(written) ?? [];
+    const [, label = "", address = "", title] = definitionLine.exec(lineText) ?? [];
     const key = normalLabel(label);
     if (key === "") continue;
-    const linkable = (safeMarkdownHref(destination) ?? webLikeHref(destination) ?? markdownFileTarget(destination)) !== null;
+    // `<https://x.dev>`: CommonMark's address in angle brackets
+    const destination = /^<(.+)>$/.exec(address)?.[1] ?? address;
+    const linkable = (safeMarkdownHref(destination) ?? webLikeHref(destination)) !== null
+      || (markdownFileTarget(destination) !== null && /[\\/]|\.\w/.test(destination));
     defined.set(key, defined.has(key) || !linkable ? null : { line, destination, ...(title ? { title: title.slice(1, -1) } : {}) });
   }
   return new Map([...defined].filter((entry): entry is [string, Definition] => entry[1] !== null));
@@ -648,6 +652,8 @@ const MAX_QUOTE_DEPTH = 32;
  * definition's line is left out only when a reference drew from it; any other stays as written.
  */
 export function parseMarkdown(source: string, depth = 0, html = false, visualizations = false): MarkdownBlock[] {
+  // a document read inside another's reading gives that reading back when it is done
+  const outer = reading;
   reading = { found: [], defined: new Map(), used: new Set() };
   try {
     const blocks = readBlocks(source, depth, html, visualizations);
@@ -663,7 +669,7 @@ export function parseMarkdown(source: string, depth = 0, html = false, visualiza
       return lines.length === 0 ? [] : [{ ...block, lines }];
     });
   } finally {
-    reading = null;
+    reading = outer;
   }
 }
 
