@@ -7,7 +7,7 @@ import { FILE_LINK_COUNT, FILE_LINK_LIMIT, linkFilePaths } from "../components/F
 import { HighlightedCode } from "../components/HighlightedCode.tsx";
 import { OpenFileContext } from "./filePaths.ts";
 import { SettingsProvider } from "./settings.ts";
-import { FOLD_CODE_AFTER_LINES, FOLD_OUTPUT_CHARS, FOLDED_CODE_LINES, foldCode, foldToolOutput, inlineMarks, isTableSeparator, mathNestsTooDeep, parseInline, parseMarkdown, safeMarkdownHref, shownText, trimUrl, type InlineNode, type ListBlock, markdownFileTarget } from "../../shared/markdown.ts";
+import { FOLD_CODE_AFTER_LINES, FOLD_OUTPUT_CHARS, FOLDED_CODE_LINES, foldCode, foldToolOutput, inlineMarks, isTableSeparator, mathNestsTooDeep, parseInline, parseMarkdown, safeMarkdownHref, shownText, trimUrl, type InlineNode, type ListBlock, type MarkdownBlock, markdownFileTarget } from "../../shared/markdown.ts";
 
 describe("parseMarkdown", () => {
   it("renders inline and display math while leaving fenced code untouched", async () => {
@@ -363,6 +363,133 @@ describe("inline markdown", () => {
     expect(parseInline("__MAC_QA_CHAT_OK__")).toEqual([
       { type: "strong", children: [{ type: "text", value: "MAC_QA_CHAT_OK" }] },
     ]);
+  });
+});
+
+describe("reference links", () => {
+  /** What a reader sees of `source`, a line per drawn line: `<words->address>` for a link or a file, `<img src>` for a picture. */
+  const drawn = (source: string, html = false): string[] => {
+    const inline = (nodes: InlineNode[]): string => nodes.map((node) => node.type === "text" || node.type === "code" || node.type === "math" ? node.value
+      : node.type === "link" ? `<${inline(node.children)}->${node.href}>` : node.type === "file" ? `<${inline(node.children)}->${node.path}>`
+        : node.type === "image" ? `<img ${node.src}>` : inline(node.children)).join("");
+    const lines = (blocks: MarkdownBlock[]): string[] => blocks.flatMap((block) => block.type === "paragraph" ? block.lines.map(inline)
+      : block.type === "heading" ? [inline(block.content)] : block.type === "table" ? [block.header, ...block.rows].map((row) => row.map(inline).join(" | "))
+        : block.type === "list" ? block.items.map((item) => inline(item.content)) : block.type === "blockquote" ? lines(block.blocks).map((line) => `> ${line}`)
+          : block.type === "code" || block.type === "math" ? [block.value] : []);
+    return lines(parseMarkdown(source, 0, html));
+  };
+
+  it("links a reference to its definition, and leaves out the definition's line (#3987)", () => {
+    const source = 'This is a [reference link][1].\nThis is another [reference link][link-name].\n\n[1]: https://www.google.com\n[link-name]: https://www.google.com "Google!"\n';
+    expect(parseMarkdown(source)).toEqual([{ type: "paragraph", lines: [
+      [{ type: "text", value: "This is a " }, { type: "link", href: "https://www.google.com", children: [{ type: "text", value: "reference link" }] }, { type: "text", value: "." }],
+      [{ type: "text", value: "This is another " }, { type: "link", href: "https://www.google.com", title: "Google!", children: [{ type: "text", value: "reference link" }] }, { type: "text", value: "." }],
+    ] }]);
+    // collapsed and shortcut forms, labels matched without case or extra spaces, a file, a picture, a quote using one
+    expect(drawn("[a][] and [Docs  Site], ![logo][l]\n> see [report]\n\n[a]: https://a.dev\n[docs site]: https://d.dev\n[l]: https://x.dev/l.png\n[report]: /repo/out/REPORT.md\nmore"))
+      .toEqual(["<a->https://a.dev> and <Docs  Site->https://d.dev>, <img https://x.dev/l.png>", "> see <report->/repo/out/REPORT.md>", "more"]);
+  });
+
+  it("hides no line a link was not drawn from, and links no label by text that reads as a definition (#4002)", () => {
+    for (const html of [false, true]) {
+      // a definition inside an HTML comment is none
+      expect(drawn("<!--\n\n[docs]: https://hidden.example\n\n-->\n\nRead [docs].", html).at(-1)).toBe("Read [docs].");
+      expect(drawn("<!--\n\n[docs]: https://wrong.example\n\n-->\n\n[docs]: https://right.example\n\n[docs]", html).at(-1)).toBe("<docs->https://right.example>");
+      // a table cell, a heading, a list item, a quote, a line after a paragraph's text, an indented line or a sentence
+      // that reads as a definition links nothing by its label, and defines nothing
+      for (const [shaped, shown] of [
+        ["| [r]: https://wrong.example | x |\n|---|---|", "[r]: <https://wrong.example->https://wrong.example> | x"],
+        ["# [r]: https://wrong.example", "[r]: <https://wrong.example->https://wrong.example>"],
+        ["- [r]: https://wrong.example", "[r]: <https://wrong.example->https://wrong.example>"],
+        ["> [r]: https://wrong.example", "> [r]: <https://wrong.example->https://wrong.example>"],
+        ["Intro\n[r]: https://wrong.example", "[r]: <https://wrong.example->https://wrong.example>"],
+        ["    [r]: https://wrong.example", "    [r]: <https://wrong.example->https://wrong.example>"],
+        ["see [r]: https://wrong.example", "see [r]: <https://wrong.example->https://wrong.example>"],
+        ['[t]: https://wrong.example "[r]"', '[t]: <https://wrong.example->https://wrong.example> "[r]"'],
+      ]) {
+        expect(drawn(`${shaped}\n\n[r]: https://right.example\n\n[r]`, html)).toContain(shown!);
+        expect(drawn(`${shaped}\n\n[r]`, html).at(-1)).toBe("[r]");
+      }
+      // a reference in a code span or a formula is no link, so its definition stays
+      expect(drawn("[`a]: ssh://h/x\n\n[`a] and [docs] `\n\n[docs]: https://d.dev", html).at(-1)).toBe("[docs]: <https://d.dev->https://d.dev>");
+      expect(drawn("[\\(a]: ssh://h/x\n\nsee [\\(a] and [docs] \\) ok\n\n[docs]: https://d.dev", html).at(-1)).toBe("[docs]: <https://d.dev->https://d.dev>");
+      // a label defined twice defines nothing; an unused definition, or one whose address is no link, stays
+      expect(drawn("[docs]\n\n[docs]: https://good.example\n[docs]: https://other.example", html))
+        .toEqual(["[docs]", "[docs]: <https://good.example->https://good.example>", "[docs]: <https://other.example->https://other.example>"]);
+      expect(drawn("[a] [b]\n\n[a]: ssh://h/x\n[c]: https://c.dev", html)).toEqual(["[a] [b]", "[a]: ssh://h/x", "[c]: <https://c.dev->https://c.dev>"]);
+      // a badge's linked picture, whose text holds brackets, stays the text it is, and its definitions with it
+      expect(drawn("[![build][badge]][ci]\n\n[badge]: https://x.dev/b.svg\n[ci]: https://ci.dev", html)).toEqual([
+        "[![build][badge]][ci]", "[badge]: <https://x.dev/b.svg->https://x.dev/b.svg>", "[ci]: <https://ci.dev->https://ci.dev>",
+      ]);
+    }
+  });
+
+  it("in generated documents, hides only lines a drawn link came from and links by no visible definition", () => {
+    // mulberry32: the same documents on every run
+    let seed = 3987;
+    const random = (): number => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const pick = <T,>(items: readonly T[]): T => items[Math.floor(random() * items.length)]!;
+    const labels = ["a", "b", "Docs"];
+    // each fragment written as a definition gets an address of its own; its colon is written as `colon`, to be ":",
+    // or "=" for the same document without definitions
+    const colon = "\u0001";
+    const fragments: Array<(address: string) => string> = [
+      (address) => `[${pick(labels)}]${colon} ${address}`,
+      (address) => `   [${pick(labels)}]${colon} ${address} "title"`,
+      (address) => `    [${pick(labels)}]${colon} ${address}`,
+      (address) => `| [${pick(labels)}]${colon} ${address} | x |\n|---|---|`,
+      (address) => `# [${pick(labels)}]${colon} ${address}`,
+      (address) => `- [${pick(labels)}]${colon} ${address}`,
+      (address) => `> [${pick(labels)}]${colon} ${address}`,
+      (address) => `see [${pick(labels)}]${colon} ${address}`,
+      () => `see [${pick(labels)}] and [x][${pick(labels)}], [${pick(labels)}][]`,
+      () => `![i][${pick(labels)}] [![i][${pick(labels)}]][${pick(labels)}]`,
+      () => `- see [${pick(labels)}]`, () => `> see [${pick(labels)}]`, () => `| [${pick(labels)}] | y |\n|---|---|`,
+      () => "<!--", () => "-->", () => "```", () => "$$", () => "`", () => "\\(", () => "\\)", () => "Intro",
+    ];
+    const keys = ["children", "lines", "content", "header", "rows", "items", "blocks"];
+    /** The characters drawn, a link's words included. */
+    const visible = (node: unknown): string => {
+      if (Array.isArray(node)) return node.map(visible).join("");
+      if (typeof node !== "object" || node === null) return "";
+      const record = node as Record<string, unknown>;
+      return (record.type === "text" || record.type === "code" || record.type === "math" ? String(record.value) : "") + keys.map((key) => visible(record[key])).join("");
+    };
+    /** Where each link a reference drew goes, and each picture: a bare address's link shows the address. */
+    const referenced = (node: unknown): string[] => {
+      if (Array.isArray(node)) return node.flatMap(referenced);
+      if (typeof node !== "object" || node === null) return [];
+      const record = node as Record<string, unknown>;
+      const own = record.type === "image" ? [String(record.src)] : record.type === "link" && visible(record.children) !== record.href ? [String(record.href)] : [];
+      return [...own, ...keys.flatMap((key) => referenced(record[key]))];
+    };
+    let checked = 0;
+    for (let document = 0; document < 1500; document += 1) {
+      const addresses = Array.from({ length: 2 + Math.floor(random() * 8) }, (_, at) => `https://d${document}-${at}.example/`);
+      const text = addresses.map((address) => pick(fragments)(address) + pick(["\n", "\n\n"])).join("");
+      const write = (written: string): string => text.replaceAll(colon, written);
+      for (const html of [false, true]) {
+        const blocks = parseMarkdown(write(":"), 0, html);
+        const without = parseMarkdown(write("="), 0, html);
+        const shown = visible(blocks);
+        const hidden = addresses.filter((address) => visible(without).includes(address) && !shown.includes(address));
+        const links = referenced(blocks).filter((href) => addresses.includes(href));
+        // every line left out is one a drawn link or picture came from, and every one of them drew from a line left out
+        expect(new Set(links)).toEqual(new Set(hidden));
+        // text that reads as a definition and stays shows its label as written: no reference linked it
+        for (const address of addresses) if (shown.includes(address)) expect(shown).toContain(`]: ${address}`);
+        // with no reference drawn, the document reads as it did with no definition in it
+        if (links.length === 0) expect(JSON.stringify(blocks)).toBe(JSON.stringify(without).replaceAll("]=", "]:"));
+        checked += links.length;
+      }
+    }
+    // the documents do draw references
+    expect(checked).toBeGreaterThan(500);
   });
 });
 
