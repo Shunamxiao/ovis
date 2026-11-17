@@ -315,30 +315,46 @@ export interface Definition { line: number; destination: string; title?: string 
 /** A whole line that reads as a definition: its label, address and title. */
 const definitionLine = /^ {0,3}\[([^[\]\n]+)\]:[ \t]*(\S+)(?:[ \t]+("[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*$/;
 /**
- * What draws nothing between a label and what a reader sees next: marks that close emphasis or open code, a backslash,
- * any space, invisible and combining characters, and the Hangul fillers and braille blank that draw an empty cell.
+ * What draws nothing between a label and what a reader sees next: marks that close emphasis or open code, a backslash
+ * (not one opening a formula), any space, invisible characters and marks that draw no space of their own, and the Hangul
+ * fillers and braille blank that draw an empty cell.
  */
-const unseen = /[*_~`\\\s\p{Cf}\p{M}\u115f\u1160\u3164\uffa0\u2800]*/yu;
+const unseen = /(?:[*_~`\s\p{Cf}\p{Mn}\p{Me}\u115f\u1160\u3164\uffa0\u2800]|\\(?!\())*/yu;
 /**
  * What a reference's label may be followed by and still read as a reference: the end of its text, a word, or what goes
- * on a sentence. Anything else (a colon of any kind or look, `：`, `∶`, `ꓽ`, a link drawing one) makes it read as a
- * definition's label, so it is no reference. The characters are allowed, not barred: one nobody thought of leaves the
- * label as text.
+ * on a sentence. Anything else (a colon of any kind or look, `：`, `∶`, `ꓽ`, a visarga `ः`, a formula `$\colon$`, a link
+ * drawing one) makes it read as a definition's label, so it is no reference. The characters are allowed, not barred: one
+ * nobody thought of leaves the label as text. A Hangul vowel or final consonant written alone (`ᆢ`) starts no word, and
+ * a `$` only a price.
  */
-const goesOn = /(?:$|[\p{Lu}\p{Ll}\p{Lt}\p{Lo}\p{N}.,;!?(){}'"\u2018\u2019\u201c\u201d\u00ab\u00bb\u2026\u2013\u2014&+=%#$@/|<>\u00a9\u00ae\u2122\u00b0\u00a7\u00b6\u2020\u2021\u2022\u00b7\u3001\u3002\uff0c\uff01\uff1f\uff08\uff09\u300c\u300d\u300e\u300f\u3010\u3011-]|\[(?=[\p{Lu}\p{Ll}\p{Lt}\p{Lo}\p{N}#@^!]))/yu;
+const goesOn = /(?:$|\p{Extended_Pictographic}|\p{So}|(?![\u1160-\u11ff])[\p{Lu}\p{Ll}\p{Lt}\p{Lo}]|[\p{N}.,;!?(){}'"\u2018\u2019\u201c\u201d\u00ab\u00bb\u2026\u2013\u2014&+=%#@/|<>\u00a9\u00ae\u2122\u00b0\u00a7\u00b6\u2020\u2021\u2022\u00b7\u00d7\u00b1\u2190-\u21ff\u3001\u3002\u3008-\u3011\u30fb\uff0c\uff01\uff1b\uff1f\uff08\uff09-]|\$(?=\d)|\[(?=[\p{Lu}\p{Ll}\p{Lt}\p{Lo}\p{N}#@^!]))/yu;
+/** Whether `written` names somewhere a link can go: an address with a host, or a path that starts as one. */
+function namesAddress(written: string): boolean {
+  return /^(?:https?:\/\/[^\s/?#]|mailto:\S)/i.test(written) || webLikeHref(written) !== null
+    || (/^(?:\.{0,2}\/|~\/|file:\/\/\/)/i.test(written) && markdownFileTarget(written) !== null);
+}
 /**
- * And whatever stands between them, a label followed by an address reads as that address's: `[r] - https://x.dev`,
- * `[r] → ./notes`. Only what is no letter, digit or bracket may stand between.
+ * Where the last address on `source` starts, -1 when none: a label before an address on its line reads as that address's,
+ * whatever stands between them (`[r] - docs.x.dev/a`, `[r] $\colon$ https://x.dev`). Asked for each label of a line, so
+ * each text the reading meets is read once.
  */
-const addressNext = /[^\p{L}\p{N}[\]\n]*?(?:https?:\/\/|www\.|mailto:|file:\/\/\/|<(?:https?:|mailto:|www\.)|\s(?:\.{0,2}|~)\/[\p{L}\p{N}._~-])/yu;
+function lastAddress(source: string): number {
+  let found = reading!.addresses.get(source);
+  if (found === undefined) {
+    found = -1;
+    for (const token of source.matchAll(/\S+/g)) {
+      if (namesAddress(token[0].replace(/^[^\p{L}\p{N}/.~]+|[^\p{L}\p{N}/]+$/gu, ""))) found = token.index;
+    }
+    reading!.addresses.set(source, found);
+  }
+  return found;
+}
 /** Whether what follows `at`, just after a label, makes that label read as a definition's. */
 function definesAt(source: string, at: number): boolean {
   unseen.lastIndex = at;
   unseen.test(source);
   goesOn.lastIndex = unseen.lastIndex;
-  if (!goesOn.test(source)) return true;
-  addressNext.lastIndex = at;
-  return addressNext.test(source);
+  return !goesOn.test(source) || lastAddress(source) >= at;
 }
 /** Whether `source` begins as a definition does (`[t]: …`, `**[t]** ： …`): it stays the text it is, and links nothing by a reference. */
 function startsAsDefinition(source: string): boolean {
@@ -376,8 +392,10 @@ let reading: {
   last: number;
   heldFrom: number;
   held: boolean;
-  /** the lines of each fenced code block of the document, from its fence to the line after its end */
+  /** the lines of each fenced code block and display formula of the document, from its first line to the line after its end */
   code: Array<[number, number]>;
+  /** where the last address of each text read starts (lastAddress) */
+  addresses: Map<string, number>;
 } | null = null;
 
 /**
@@ -404,8 +422,9 @@ function definitions(text: string, found: NonNullable<typeof reading>["found"], 
     }
     return false;
   };
-  // a code span holds no comment either: read as the inline reader reads one, its `<!--` is not looked for
-  const searched = text.replace(/`[^`\n]+`/g, (span) => " ".repeat(span.length));
+  // a code span or a formula on a line holds no comment either: read as the inline reader reads one, its `<!--` is not
+  // looked for
+  const searched = text.replace(/`[^`\n]+`|\\\(.*?\\\)|\$[^$\n]+\$/g, (span) => " ".repeat(span.length));
   const comments: Array<[number, number]> = [];
   for (let from = 0; ;) {
     const open = searched.indexOf("<!--", from);
@@ -427,9 +446,7 @@ function definitions(text: string, found: NonNullable<typeof reading>["found"], 
     if (key === "") continue;
     // `<https://x.dev>`: CommonMark's address in angle brackets
     const destination = /^<(.+)>$/.exec(address)?.[1] ?? address;
-    const linkable = /^(?:https?:\/\/[^\s/?#]|mailto:\S)/i.test(destination) || webLikeHref(destination) !== null
-      || (/^(?:\.{0,2}\/|~\/|file:\/\/\/)/i.test(destination) && markdownFileTarget(destination) !== null);
-    defined.set(key, defined.has(key) || !linkable ? null : { line, destination, ...(title ? { title: title.slice(1, -1) } : {}) });
+    defined.set(key, defined.has(key) || !namesAddress(destination) ? null : { line, destination, ...(title ? { title: title.slice(1, -1) } : {}) });
   }
   return new Map([...defined].filter((entry): entry is [string, Definition] => entry[1] !== null));
 }
@@ -539,13 +556,24 @@ function startsTable(lines: string[], index: number): boolean {
   return lineAt(lines, index).includes("|") && isTableSeparator(lineAt(lines, index + 1));
 }
 /** A table in a list item (`within` > 0) ends at a line outside the item or at the next item. */
+/**
+ * A table row's cells read. A label in a cell before one that shows an address reads as that address's (`| [docs] |
+ * https://x.dev |`), as on a line: it links nothing by a reference.
+ */
+function rowCells(line: string): InlineNode[][] {
+  const row = cells(line);
+  let addressed = -1;
+  if (reading !== null) row.forEach((cell, at) => { if (lastAddress(cell) >= 0) addressed = at; });
+  return row.map((cell, at) => at < addressed ? readInline(cell, true, 0, undefined) : parseInline(cell));
+}
+
 function parseTable(lines: string[], start: number, within = 0): { block: MarkdownBlock; next: number } {
-  const header = cells(lineAt(lines, start)).map((cell) => parseInline(cell));
+  const header = rowCells(lineAt(lines, start));
   let index = start + 2;
   const rows: InlineNode[][][] = [];
   const inItem = (line: string): boolean => within === 0 || ((/^\s*/.exec(line)?.[0].length ?? 0) >= within && !listLine.test(line));
   while (index < lines.length && lineAt(lines, index).includes("|") && lineAt(lines, index).trim() !== "" && inItem(lineAt(lines, index))) {
-    rows.push(cells(lineAt(lines, index)).map((cell) => parseInline(cell)));
+    rows.push(rowCells(lineAt(lines, index)));
     index += 1;
   }
   return { block: { type: "table", header, rows }, next: index };
@@ -718,15 +746,17 @@ const MAX_QUOTE_DEPTH = 32;
 export function parseMarkdown(source: string, depth = 0, html = false, visualizations = false, writing = false): MarkdownBlock[] {
   // a document read inside another's reading gives that reading back when it is done
   const outer = reading;
-  const first: NonNullable<typeof reading> = reading = { found: [], defined: new Map(), used: new Set(), last: 0, heldFrom: Infinity, held: false, code: [] };
+  const first: NonNullable<typeof reading> = reading = { found: [], defined: new Map(), used: new Set(), last: 0, heldFrom: Infinity, held: false, code: [], addresses: new Map() };
   try {
     const blocks = readBlocks(source, depth, html, visualizations);
     const text = source.replace(/\r\n?/g, "\n");
     // what is still being written defines nothing: its last line may stop mid-address, and the line after a block's last
     // may still make it something else (a table's header row)
-    const defined = definitions(text, first.found.filter(({ line }) => !writing || line < first.last), first.code);
+    // (the line just before the last too: a table's separator arriving under it makes it the table's header)
+    const lastLine = text.split("\n").length - 1;
+    const defined = definitions(text, first.found.filter(({ line }) => !writing || (line < first.last && line < lastLine - 1)), first.code);
     if (defined.size === 0) return blocks;
-    const second: NonNullable<typeof reading> = reading = { found: [], defined, used: new Set(), last: 0, heldFrom: writing ? first.last : Infinity, held: false, code: [] };
+    const second: NonNullable<typeof reading> = reading = { found: [], defined, used: new Set(), last: 0, heldFrom: writing ? first.last : Infinity, held: false, code: [], addresses: new Map() };
     const linked = readBlocks(source, depth, html, visualizations);
     const hidden = new Set(second.found.filter(({ line }) => second.used.has(line)).map(({ nodes }) => nodes));
     return linked.flatMap((block): MarkdownBlock[] => {
@@ -799,6 +829,7 @@ function readBlocks(source: string, depth: number, html: boolean, visualizations
           body.push(part.slice(0, at));
           const value = body.join("\n").trim();
           blocks.push(open === "$$" ? { type: "math", value, dollar: true, ...(next === index ? { oneLine: true as const } : {}) } : { type: "math", value });
+          reading!.code.push([offset + index, offset + next + 1]);
           index = next + 1;
           complete = true;
           break;
