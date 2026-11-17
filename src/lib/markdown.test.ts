@@ -394,6 +394,8 @@ describe("reference links", () => {
     for (const html of [false, true]) {
       // a definition inside an HTML comment is none; a `<!--` in a code example opens no comment
       expect(drawn("```html\n<!-- a sample\n```\n\nRead [docs].\n\n[docs]: https://d.dev", html).at(-1)).toBe("Read <docs->https://d.dev>.");
+      expect(drawn("Intro.\n\n> ```html\n> <!-- a sample\n> ```\n\nRead [docs].\n\n[docs]: https://d.dev", html).at(-1)).toBe("Read <docs->https://d.dev>.");
+      expect(drawn("Write `<!--` to start one.\n\nRead [docs].\n\n[docs]: https://d.dev", html).at(-1)).toBe("Read <docs->https://d.dev>.");
       expect(drawn("<!--\n\n[docs]: https://hidden.example\n\n-->\n\nRead [docs].", html).at(-1)).toBe("Read [docs].");
       expect(drawn("<!--\n\n[docs]: https://wrong.example\n\n-->\n\n[docs]: https://right.example\n\n[docs]", html).at(-1)).toBe("<docs->https://right.example>");
       // a table cell, a heading, a list item, a quote, a line after a paragraph's text, an indented line or a sentence
@@ -421,6 +423,11 @@ describe("reference links", () => {
         // any space (a thin one here) and a colon-like ratio sign
         ["[r]\u2009: https://wrong.example", "[r]\u2009: <https://wrong.example->https://wrong.example>"],
         ["[r] \u2236 https://wrong.example", "[r] \u2236 <https://wrong.example->https://wrong.example>"],
+        ["[r] \u2982 https://wrong.example", "[r] \u2982 <https://wrong.example->https://wrong.example>"],
+        ["[r]\u034f: https://wrong.example", "[r]\u034f: <https://wrong.example->https://wrong.example>"],
+        // and with no colon at all, a label beside an address is that address's
+        ["[r] \u2192 https://wrong.example", "[r] \u2192 <https://wrong.example->https://wrong.example>"],
+        ["see [r] - https://wrong.example", "see [r] - <https://wrong.example->https://wrong.example>"],
       ]) {
         expect(drawn(`${shaped}\n\n[r]: https://right.example\n\n[r]`, html)).toContain(shown!);
         expect(drawn(`${shaped}\n\n[r]`, html).at(-1)).toBe("[r]");
@@ -443,6 +450,8 @@ describe("reference links", () => {
         .toEqual(["<a->./notes> <b->../x.md:12> <c->~/out/log#L3> <d->https://www.x.dev> <e->mailto:a@b.dev>"]);
       // an address in angle brackets is the address
       expect(drawn("See [a].\n\n[a]: <https://a.dev>", html)).toEqual(["See <a->https://a.dev>."]);
+      // a picture named by a web address without its scheme is that address's, not a file of that name
+      expect(drawn("![chart][c]\n\n[c]: www.x.dev/a.png", html)).toEqual(["<img https://www.x.dev/a.png>"]);
       // a badge's linked picture, whose text holds brackets, stays the text it is, and its definitions with it
       expect(drawn("[![build][badge]][ci]\n\n[badge]: https://x.dev/b.svg\n[ci]: https://ci.dev", html)).toEqual([
         "[![build][badge]][ci]", "[badge]: <https://x.dev/b.svg->https://x.dev/b.svg>", "[ci]: <https://ci.dev->https://ci.dev>",
@@ -476,6 +485,9 @@ describe("reference links", () => {
     // a reference streaming in is not read before it is whole: `[docs][a` does not link docs on the way to `[docs][api]`
     const reference = "[docs]: https://docs.example\n[api]: https://api.example\n\nSee [docs][api] now";
     expect(new Set(renders(reference).flat())).toEqual(new Set(["docs->https://api.example"]));
+    // a definition the next line turns into a table's header never links before another one does
+    const header = "See [docs]\n\n[docs]: https://a.example/|x\n|---|---|\n\n[docs]: https://b.example\n\nend";
+    expect(new Set(renders(header).flat())).toEqual(new Set(["docs->https://b.example"]));
     // a finished text reads as it does when it is not written any more
     for (const full of [definition, reference]) expect(parseMarkdown(full, 0, false, true, false)).toEqual(parseMarkdown(full, 0, false, true));
     // a block written before the last one is read as soon as the last one starts
@@ -496,7 +508,8 @@ describe("reference links", () => {
     const labels = ["a", "b", "Docs"];
     // a definition's colon, and what only reads as one: written here apart from the parser's own pattern
     const colon = (): string => random() < 0.5 ? ":" : pick([" :", "\t:", "\u202f:", "\u2009:", "\u2060:", "\ufeff:", "\u200d:", "\uff1a", " \uff1a", "\ufe55",
-      "\u2236", " \u2236", "\ufe30", "\ua789", "\u02f8", "\u02d0", "\\:", "\\ :", "\\\\:", " **:**", " `:`", "\u3000:", "\u00a0:"]);
+      "\u2236", " \u2236", "\ufe30", "\ua789", "\u02f8", "\u02d0", "\\:", "\\ :", "\\\\:", " **:**", " `:`", "\u3000:", "\u00a0:", " \u2982", "\u034f:", " \u2192", " -", " =>",
+      "\ufe0f:", "\u3164:", "\u2800:", "\ua4fd", " \ua4fd", "\u16ec", "\u0903", " [:](#x)"]);
     const fragments: Array<(address: string) => string> = [
       (address) => `[${pick(labels)}]${colon()} ${address}`,
       (address) => `   [${pick(labels)}]${colon()} ${address} "title"`,
@@ -534,8 +547,6 @@ describe("reference links", () => {
         : record.type === "link" && read([record as InlineNode]).startsWith("⟦") ? [String(record.href)] : [];
       return [...own, ...Object.values(record).flatMap(targets)];
     };
-    // after a reference's words: any marks, spaces, invisible characters or backslashes, then anything a reader takes for a colon
-    const COLON_AFTER = /⟧(?:[*_~`\s\p{Cf}]|\\)*[:\uff1a\ufe55\ufe13\ufe30\u2236\ua789\u02f8\u02d0\u0589\u05c3\u1361\u1804\u205a]/u;
     let drawnCount = 0;
     let streamed = 0;
     for (let document = 0; document < 1500; document += 1) {
@@ -550,10 +561,11 @@ describe("reference links", () => {
         const unlinked = lines(parseMarkdown(twice + text, 0, html).slice(1));
         // the lines left out are exactly the ones a drawn link came from; every other line reads as it does unlinked
         expect(lines(blocks).map(plain), text).toEqual(unlinked.filter((line) => !drawnTo.some((target) => line.includes(target))).map(plain));
-        // a reference before a colon reads as a definition, and so does a line that starts as one: neither links its label
-        for (const line of lines(blocks)) {
-          expect(COLON_AFTER.test(line), `${line} in ${JSON.stringify(text)}`).toBe(false);
-          if (/^\s*[*_~]*\[[^[\]]+\](?:\[[^[\]]*\])?(?:[*_~`\s\p{Cf}]|\\)*[:\uff1a\ufe55\ufe13\ufe30\u2236\ua789\u02f8\u02d0\u0589\u05c3\u1361\u1804\u205a]/u.test(line)) expect(line, text).not.toContain("⟦");
+        // the label shown last before an address on its line is that address's, whatever stands between them (a colon of
+        // any kind, a mark, an arrow): it stays as written, never a reference's link
+        for (const line of lines(blocks)) for (const address of addresses) {
+          const before = line.slice(0, line.indexOf(address));
+          if (line.includes(address) && before.includes("⟧")) expect(before.lastIndexOf("]") > before.lastIndexOf("⟧"), `${line} in ${JSON.stringify(text)}`).toBe(true);
         }
         for (const target of new Set(drawnTo)) {
           // no definition is taken inside an HTML comment (one in a code example opens none: those are left to the explicit tests)
@@ -567,7 +579,7 @@ describe("reference links", () => {
       }
     }
     // the documents do draw references
-    expect(drawnCount).toBeGreaterThan(250);
+    expect(drawnCount).toBeGreaterThan(200);
     // as a chat answer streams in, each reference (here with words of its own) links to one whole address, the same at
     // every step it links at all
     for (let document = 0; document < 200; document += 1) {
@@ -577,6 +589,7 @@ describe("reference links", () => {
         () => `[${pick(labels)}]: ${address}`, () => `[${pick(labels)}]: ${address} "title"`,
         // a reference's own words defined too: `[w1][a` would link w1 by itself before `[w1][a]` is whole
         () => `[w${Math.floor(random() * 6)}]: ${address}`,
+        () => `[${pick(labels)}]: ${address}|x\n|---|---|`,
         () => `see [w${word++}][${pick(labels)}] and ![w${word++}][${pick(labels)}]`, () => `- [w${word++}][${pick(labels)}]`,
         () => `> [w${word++}][${pick(labels)}]`, () => `| [w${word++}][${pick(labels)}] | y |\n|---|---|`, () => "Intro", () => "<!--", () => "-->",
       ])() + pick(["\n", "\n\n", "\r\n"])).join("");

@@ -296,7 +296,7 @@ export function* inlineMarks(source: string, defined?: ReadonlyMap<string, Defin
     // linked picture (`[![build][badge]][ci]`), `[[x]]`, `\[x]`. A `]` that ended the mark before is no such bracket:
     // `[one][a][two][b]` is two references
     const before = start - (source[start - 1] === "!" ? 1 : 0);
-    if (pattern === reference && (!defined!.has(referenceLabel(match)) || colonAt(source, start + match[0].length)
+    if (pattern === reference && (!defined!.has(referenceLabel(match)) || definesAt(source, start + match[0].length)
       || /[[\\]/.test(source[before - 1] ?? "") || (source[before - 1] === "]" && before !== ended))) continue;
     // a price, not a formula: `$5 for the $` (a number, a space, then a word) stays text
     if (char === "$" && /^\$\d[\d.,]*\s+\p{L}/u.test(match[0])) continue;
@@ -315,19 +315,36 @@ export interface Definition { line: number; destination: string; title?: string 
 /** A whole line that reads as a definition: its label, address and title. */
 const definitionLine = /^ {0,3}\[([^[\]\n]+)\]:[ \t]*(\S+)(?:[ \t]+("[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*$/;
 /**
- * What makes a label read as a definition's: a colon after it, whatever comes between (marks that close emphasis or open
- * code, any space or invisible format character, a backslash) and whichever colon it is: ASCII, full-width as Chinese,
- * Japanese and Korean text writes it, or one of its look-alikes.
+ * What draws nothing between a label and what a reader sees next: marks that close emphasis or open code, a backslash,
+ * any space, invisible and combining characters, and the Hangul fillers and braille blank that draw an empty cell.
  */
-const COLON = String.raw`(?:[*_~\x60\s\p{Cf}]|\\)*[:\uff1a\ufe55\ufe13\ufe30\u2236\ua789\u02f8\u02d0\u0589\u05c3\u1361\u1804\u205a]`;
-/** Text that begins as a definition does (`[t]: …`, `**[t]** ： …`): it stays the text it is, and links nothing by a reference. */
-const definitionStart = new RegExp(String.raw`^\s*[*_~]*\[[^[\]\n]+\](?:\[[^[\]\n]*\])?${COLON}`, "u");
-/** Whether a colon follows at `at`: what is before it reads as a definition's label. */
-function colonAt(source: string, at: number): boolean {
-  colonAfterMarks.lastIndex = at;
-  return colonAfterMarks.test(source);
+const unseen = /[*_~`\\\s\p{Cf}\p{M}\u115f\u1160\u3164\uffa0\u2800]*/yu;
+/**
+ * What a reference's label may be followed by and still read as a reference: the end of its text, a word, or what goes
+ * on a sentence. Anything else (a colon of any kind or look, `：`, `∶`, `ꓽ`, a link drawing one) makes it read as a
+ * definition's label, so it is no reference. The characters are allowed, not barred: one nobody thought of leaves the
+ * label as text.
+ */
+const goesOn = /(?:$|[\p{Lu}\p{Ll}\p{Lt}\p{Lo}\p{N}.,;!?(){}'"\u2018\u2019\u201c\u201d\u00ab\u00bb\u2026\u2013\u2014&+=%#$@/|<>\u00a9\u00ae\u2122\u00b0\u00a7\u00b6\u2020\u2021\u2022\u00b7\u3001\u3002\uff0c\uff01\uff1f\uff08\uff09\u300c\u300d\u300e\u300f\u3010\u3011-]|\[(?=[\p{Lu}\p{Ll}\p{Lt}\p{Lo}\p{N}#@^!]))/yu;
+/**
+ * And whatever stands between them, a label followed by an address reads as that address's: `[r] - https://x.dev`,
+ * `[r] → ./notes`. Only what is no letter, digit or bracket may stand between.
+ */
+const addressNext = /[^\p{L}\p{N}[\]\n]*?(?:https?:\/\/|www\.|mailto:|file:\/\/\/|<(?:https?:|mailto:|www\.)|\s(?:\.{0,2}|~)\/[\p{L}\p{N}._~-])/yu;
+/** Whether what follows `at`, just after a label, makes that label read as a definition's. */
+function definesAt(source: string, at: number): boolean {
+  unseen.lastIndex = at;
+  unseen.test(source);
+  goesOn.lastIndex = unseen.lastIndex;
+  if (!goesOn.test(source)) return true;
+  addressNext.lastIndex = at;
+  return addressNext.test(source);
 }
-const colonAfterMarks = new RegExp(COLON, "yu");
+/** Whether `source` begins as a definition does (`[t]: …`, `**[t]** ： …`): it stays the text it is, and links nothing by a reference. */
+function startsAsDefinition(source: string): boolean {
+  const label = /^\s*[*_~]*\[[^[\]\n]+\](?:\[[^[\]\n]*\])?/.exec(source);
+  return label !== null && definesAt(source, label[0].length);
+}
 /** CommonMark's longest label. */
 const LABEL_LIMIT = 999;
 
@@ -387,9 +404,11 @@ function definitions(text: string, found: NonNullable<typeof reading>["found"], 
     }
     return false;
   };
+  // a code span holds no comment either: read as the inline reader reads one, its `<!--` is not looked for
+  const searched = text.replace(/`[^`\n]+`/g, (span) => " ".repeat(span.length));
   const comments: Array<[number, number]> = [];
   for (let from = 0; ;) {
-    const open = text.indexOf("<!--", from);
+    const open = searched.indexOf("<!--", from);
     if (open === -1) break;
     if (inCode(open)) { from = open + 4; continue; }
     const close = text.indexOf("-->", open + 4);
@@ -424,7 +443,7 @@ function inlineLink(inside: string): { destination: string; title?: string } {
 /** Dependency-free inline markdown scanner. Unknown or malformed markup remains text. */
 export function parseInline(source: string, links = true, depth = 0): InlineNode[] {
   // text that reads as a definition links nothing by a reference, in its title's emphasis neither
-  return readInline(source, links, depth, reading !== null && !reading.held && reading.defined.size > 0 && !definitionStart.test(source) ? reading.defined : undefined);
+  return readInline(source, links, depth, reading !== null && !reading.held && reading.defined.size > 0 && !startsAsDefinition(source) ? reading.defined : undefined);
 }
 
 /** `defined`: the definitions a reference in `source` may name; none, so no reference is read. */
@@ -436,7 +455,7 @@ function readInline(source: string, links: boolean, depth: number, defined: Read
     const index = match.index ?? 0;
     let token = match[0];
     // emphasis followed by `:` (`**[r]**: …`) reads as a definition's label: what is in it is no reference
-    const inner = defined !== undefined && colonAt(source, index + token.length) ? undefined : defined;
+    const inner = defined !== undefined && definesAt(source, index + token.length) ? undefined : defined;
     // the `!` of an image stays in the text before its bracket
     const image = token.startsWith("[") && index > offset && source[index - 1] === "!";
     const textEnd = image ? index - 1 : index;
@@ -477,7 +496,8 @@ function readInline(source: string, links: boolean, depth: number, defined: Read
       const children = readInline(label, false, depth, undefined);
       const shown: InlineNode = href !== null ? (title ? { type: "link", href, title, children } : { type: "link", href, children })
         : markdownFileNode(target, children) ?? { type: "text", value: label };
-      if (image) nodes.push({ type: "image", alt: label, src: target, fallback: [{ type: "text", value: "!" }, shown] });
+      // a picture a definition names by a web address (`www.x.dev/a.png`) is that address's, not a file of that name
+      if (image) nodes.push({ type: "image", alt: label, src: token[close + 1] === "(" ? target : href ?? target, fallback: [{ type: "text", value: "!" }, shown] });
       else nodes.push(shown);
     } else if (token.startsWith("**") || token.startsWith("__")) {
       nodes.push({ type: "strong", children: readInline(token.slice(2, -2), links, depth + 1, inner) });
@@ -702,8 +722,9 @@ export function parseMarkdown(source: string, depth = 0, html = false, visualiza
   try {
     const blocks = readBlocks(source, depth, html, visualizations);
     const text = source.replace(/\r\n?/g, "\n");
-    const open = writing ? text.split("\n").length - 1 : -1;
-    const defined = definitions(text, first.found.filter(({ line }) => line !== open), first.code);
+    // what is still being written defines nothing: its last line may stop mid-address, and the line after a block's last
+    // may still make it something else (a table's header row)
+    const defined = definitions(text, first.found.filter(({ line }) => !writing || line < first.last), first.code);
     if (defined.size === 0) return blocks;
     const second: NonNullable<typeof reading> = reading = { found: [], defined, used: new Set(), last: 0, heldFrom: writing ? first.last : Infinity, held: false, code: [] };
     const linked = readBlocks(source, depth, html, visualizations);
@@ -719,7 +740,8 @@ export function parseMarkdown(source: string, depth = 0, html = false, visualiza
   }
 }
 
-function readBlocks(source: string, depth: number, html: boolean, visualizations: boolean): MarkdownBlock[] {
+/** `offset`: the line of the document `source` starts at (a quote's lines are read on their own). */
+function readBlocks(source: string, depth: number, html: boolean, visualizations: boolean, offset = 0): MarkdownBlock[] {
   // `visualizations`: a Codex visualization reference on its own line is a block (shared/visualization.ts). Only a
   // chat answer asks for it; everywhere else the line stays the text it is
   const lines = source.replace(/\r\n?/g, "\n").split("\n");
@@ -756,7 +778,7 @@ function readBlocks(source: string, depth: number, html: boolean, visualizations
         body.push(bodyLine.startsWith(indent) ? bodyLine.slice(indent.length) : bodyLine.trimStart());
       }
       if (index < lines.length) index += 1;
-      if (depth === 0) reading!.code.push([opened, index]);
+      reading!.code.push([offset + opened, offset + index]);
       blocks.push({ type: "code", language: fence[2] ?? "", value: body.join("\n") });
       continue;
     }
@@ -818,9 +840,10 @@ function readBlocks(source: string, depth: number, html: boolean, visualizations
 
     if (/^\s*>/.test(line)) {
       const quoted: string[] = [];
+      const quoteStart = index;
       while (index < lines.length && /^\s*>/.test(lineAt(lines, index))) quoted.push(lineAt(lines, index++).replace(/^\s*>\s?/, ""));
       // a line of thousands of ">" (text nobody wrote by hand) would otherwise overflow the stack
-      blocks.push({ type: "blockquote", blocks: depth < MAX_QUOTE_DEPTH ? readBlocks(quoted.join("\n"), depth + 1, html, visualizations)
+      blocks.push({ type: "blockquote", blocks: depth < MAX_QUOTE_DEPTH ? readBlocks(quoted.join("\n"), depth + 1, html, visualizations, offset + quoteStart)
         : [{ type: "paragraph", lines: quoted.map((quotedLine) => parseInline(quotedLine)) }] });
       continue;
     }
