@@ -343,8 +343,9 @@ let reading: {
 /**
  * The definitions among `found` that references may resolve to. A label defined twice defines nothing, and neither does
  * a line inside an HTML comment (an earlier `<!--` that no `-->` closed, wherever it is written) or an address that
- * cannot be a link: their lines stay the text they are. A file is named by a path, with a separator or an extension:
- * `[build]: passed` or `[^1]: Wikipedia` is a note, not a file.
+ * cannot be a link: their lines stay the text they are. A file is named by a path that starts as one (`/`, `./`, `~/`,
+ * `C:\`) or ends in an extension: `[build]: passed`, `[status]: N/A`, `[test]: 120/120` or `[coverage]: 87.5%` is what
+ * an agent reported, not a file.
  */
 function definitions(text: string, found: NonNullable<typeof reading>["found"]): Map<string, Definition> {
   const comments: Array<[number, number]> = [];
@@ -370,7 +371,8 @@ function definitions(text: string, found: NonNullable<typeof reading>["found"]):
     // `<https://x.dev>`: CommonMark's address in angle brackets
     const destination = /^<(.+)>$/.exec(address)?.[1] ?? address;
     const linkable = (safeMarkdownHref(destination) ?? webLikeHref(destination)) !== null
-      || (markdownFileTarget(destination) !== null && /[\\/]|\.\w/.test(destination));
+      || (markdownFileTarget(destination) !== null && (/^(?:\.{0,2}\/|~\/|[A-Za-z]:[\\/]|file:)/i.test(destination)
+        || /\.[A-Za-z][\w-]*(?:#L\d+(?:-L?\d+)?|(?::\d+){1,2})?$/.test(destination)));
     defined.set(key, defined.has(key) || !linkable ? null : { line, destination, ...(title ? { title: title.slice(1, -1) } : {}) });
   }
   return new Map([...defined].filter((entry): entry is [string, Definition] => entry[1] !== null));

@@ -419,8 +419,13 @@ describe("reference links", () => {
         .toEqual(["[docs]", "[docs]: <https://good.example->https://good.example>", "[docs]: <https://other.example->https://other.example>"]);
       expect(drawn("[a] [b]\n\n[a]: ssh://h/x\n[c]: https://c.dev", html)).toEqual(["[a] [b]", "[a]: ssh://h/x", "[c]: <https://c.dev->https://c.dev>"]);
       // a word, a note or an emoji names no file: its line is what the agent said
-      expect(drawn("Results for [build], [test] and [s][^1].\n\n[build]: passed\n[^1]: Wikipedia\n[s]: \u2705", html))
-        .toEqual(["Results for [build], [test] and [s][^1].", "[build]: passed", "[^1]: Wikipedia", "[s]: \u2705"]);
+      const values = ["passed", "Wikipedia", "\u2705", "N/A", "120/120", "pass/fail", "2026/11/17", "87.5%", "1.2.3", "9.5", "e.g."];
+      const report = `Results: ${values.map((_, at) => `[v${at}]`).join(" ")} [^1]`;
+      expect(drawn(`${report}\n\n${values.map((value, at) => `[v${at}]: ${value}`).join("\n")}\n[^1]: Wikipedia`, html))
+        .toEqual([report, ...values.map((value, at) => `[v${at}]: ${value}`), "[^1]: Wikipedia"]);
+      // a file is named by a path that starts as one, or by its extension, with a line or not
+      expect(drawn("[a] [b] [c] [d] [e]\n\n[a]: README.md\n[b]: src/x.ts\n[c]: x.ts:12\n[d]: ./notes\n[e]: ~/out/log#L3", html))
+        .toEqual(["<a->README.md> <b->src/x.ts> <c->x.ts:12> <d->./notes> <e->~/out/log#L3>"]);
       // an address in angle brackets is the address
       expect(drawn("See [a].\n\n[a]: <https://a.dev>", html)).toEqual(["See <a->https://a.dev>."]);
       // a badge's linked picture, whose text holds brackets, stays the text it is, and its definitions with it
