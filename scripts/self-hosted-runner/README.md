@@ -452,8 +452,7 @@ poll.
 
 The gate is not a limit on jobs: a host's `--count` still has to fit its `CHECK_HOST_MAX_RUNS` (at most
 8, the most herdr-backed lanes `scripts/check.ts` admits), and the two thresholds are what a person
-tunes to keep a loaded host out of the pool. On the P620, `--count 8 --reserved 2 --offer-when-room`
-with `CHECK_HOST_MAX_RUNS=3` never has more than three heavy jobs and starts the rest as those end.
+tunes to keep a loaded host out of the pool.
 
 ## Cloud VM runners
 

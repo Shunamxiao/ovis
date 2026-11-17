@@ -1477,15 +1477,16 @@ describe.skipIf(process.platform === "win32")("self-hosted runner launcher", () 
     });
 
     it("holds a slot while a runner of its own pool on this host is idle, and starts it once that is offered a job", async () => {
-      // slot 9 belongs to this host but to no slot of this launcher: every launcher copy's runners count
-      const runner = launchRunner({ count: 1, offer: true, offerPause: undefined, peers: [peer(9)] });
+      // pr-9 is another launcher copy's runner on this host: every launcher copy's runners count
+      const copy = (worker = false) => ({ ...peer(9, "self-hosted-ovis", worker), name: `herdr-ci-${host}-pr-9` });
+      const runner = launchRunner({ count: 1, offer: true, offerPause: undefined, peers: [copy()] });
       try {
-        await runner.until(/waiting for room on this host: the runner herdr-ci-\S+-9 of this pool is idle/, "saw the idle runner", runner.stderr);
+        await runner.until(/waiting for room on this host: the runner herdr-ci-\S+-pr-9 of this pool is idle/, "saw the idle runner", runner.stderr);
         expect(runner.stderr()).toContain(`[herdr-ci-${host}-1] waiting for room on this host`);
         expect(runner.calls()).not.toContain("registration-token");
         expect(runnerRuns(runner.calls())).toEqual([]);
         // the idle runner takes a job: no runner of this pool is idle any more
-        writePeers(runner.peers, [peer(9, "self-hosted-ovis", true)]);
+        writePeers(runner.peers, [copy(true)]);
         expect(await runner.ended()).toBe(0);
         expect(runnerRuns(runner.calls())).toHaveLength(1);
         expect(runner.stderr()).toContain(`[herdr-ci-${host}-1] there is room on this host: starting a runner`);

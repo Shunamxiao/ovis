@@ -557,10 +557,13 @@ psi_under() {
 
 # Sets OFFER_HOLD to the reason to wait when this host has no room right now.
 offer_room() {
-  local name labels procs youngest="" age value started
+  local name slot labels procs youngest="" age value started
   OFFER_HOLD=""
   for name in $(docker ps --filter "name=$PEER_PREFIX" --format '{{.Names}}' 2>/dev/null || true); do
-    case "${name#"$PEER_PREFIX"}" in ''|*[!0-9]*) continue ;; esac
+    # <prefix><slot> or a launcher copy's <prefix><word>-<slot> (pr-3, main-1, appb-2)
+    slot="${name#"$PEER_PREFIX"}"
+    slot="${slot##*-}"
+    case "$slot" in ''|*[!0-9]*) continue ;; esac
     # seconds since it started, and the command line: a Runner.Worker is a job; one still registering
     # has none, so the container counts as idle and an offer of this pool is already on its way. A
     # container whose processes cannot be read is neither: a broken docker top must not stop every
