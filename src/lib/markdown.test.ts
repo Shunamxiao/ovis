@@ -367,8 +367,11 @@ describe("inline markdown", () => {
 });
 
 describe("reference links", () => {
-  /** What a reader sees of `source`, a line per drawn line: `<words->address>` for a link or a file, `<img src>` for a picture. */
-  const drawn = (source: string, html = false): string[] => {
+  /**
+   * What a reader sees of `source` in a file's Preview (or in a chat message, `html` false), a line per drawn line:
+   * `<words->address>` for a link or a file, `<img src>` for a picture.
+   */
+  const drawn = (source: string, html = true): string[] => {
     const inline = (nodes: InlineNode[]): string => nodes.map((node) => node.type === "text" || node.type === "code" || node.type === "math" ? node.value
       : node.type === "link" ? `<${inline(node.children)}->${node.href}>` : node.type === "file" ? `<${inline(node.children)}->${node.path}>`
         : node.type === "image" ? `<img ${node.src}>` : inline(node.children)).join("");
@@ -381,7 +384,7 @@ describe("reference links", () => {
 
   it("links a reference to its definition, and leaves out the definition's line (#3987)", () => {
     const source = 'This is a [reference link][1].\nThis is another [reference link][link-name].\n\n[1]: https://www.google.com\n[link-name]: https://www.google.com "Google!"\n';
-    expect(parseMarkdown(source)).toEqual([{ type: "paragraph", lines: [
+    expect(parseMarkdown(source, 0, true)).toEqual([{ type: "paragraph", lines: [
       [{ type: "text", value: "This is a " }, { type: "link", href: "https://www.google.com", children: [{ type: "text", value: "reference link" }] }, { type: "text", value: "." }],
       [{ type: "text", value: "This is another " }, { type: "link", href: "https://www.google.com", title: "Google!", children: [{ type: "text", value: "reference link" }] }, { type: "text", value: "." }],
     ] }]);
@@ -390,93 +393,108 @@ describe("reference links", () => {
       .toEqual(["<a->https://a.dev> and <Docs  Site->https://d.dev>, <img https://x.dev/l.png>", "> see <report->/repo/out/REPORT.md>", "more"]);
   });
 
+  it("leaves them as written in a chat message, each definition with its address in view", () => {
+    // an agent's text arrives as it is written: a line still to come could change where a link goes
+    expect(drawn('This is a [reference link][1].\n\n[1]: https://www.google.com "Google!"', false))
+      .toEqual(["This is a [reference link][1].", '[1]: <https://www.google.com->https://www.google.com> "Google!"']);
+    expect(drawn("[a][] and [b]\n\n[a]: https://a.dev\n[b]: /repo/out/REPORT.md", false)).toEqual(["[a][] and [b]", "[a]: <https://a.dev->https://a.dev>", "[b]: /repo/out/REPORT.md"]);
+  });
+
   it("hides no line a link was not drawn from, and links no label by text that reads as a definition (#4002)", () => {
-    for (const html of [false, true]) {
-      // a definition inside an HTML comment is none; a `<!--` in a code example opens no comment
-      expect(drawn("```html\n<!-- a sample\n```\n\nRead [docs].\n\n[docs]: https://d.dev", html).at(-1)).toBe("Read <docs->https://d.dev>.");
-      expect(drawn("Intro.\n\n> ```html\n> <!-- a sample\n> ```\n\nRead [docs].\n\n[docs]: https://d.dev", html).at(-1)).toBe("Read <docs->https://d.dev>.");
-      expect(drawn("Write `<!--` to start one.\n\nRead [docs].\n\n[docs]: https://d.dev", html).at(-1)).toBe("Read <docs->https://d.dev>.");
-      // nor one in a formula
-      for (const formula of ["Example: \\(<!--\\)", "Example: $<!--$", "$$\n<!--\n$$"]) {
-        expect(drawn(`${formula}\n\nRead [docs].\n\n[docs]: https://d.dev`, html).at(-1), formula).toBe("Read <docs->https://d.dev>.");
-      }
-      expect(drawn("<!--\n\n[docs]: https://hidden.example\n\n-->\n\nRead [docs].", html).at(-1)).toBe("Read [docs].");
-      expect(drawn("<!--\n\n[docs]: https://wrong.example\n\n-->\n\n[docs]: https://right.example\n\n[docs]", html).at(-1)).toBe("<docs->https://right.example>");
-      // a table cell, a heading, a list item, a quote, a line after a paragraph's text, an indented line or a sentence
-      // that reads as a definition links nothing by its label, and defines nothing
-      for (const [shaped, shown] of [
-        ["| [r]: https://wrong.example | x |\n|---|---|", "[r]: <https://wrong.example->https://wrong.example> | x"],
-        ["# [r]: https://wrong.example", "[r]: <https://wrong.example->https://wrong.example>"],
-        ["- [r]: https://wrong.example", "[r]: <https://wrong.example->https://wrong.example>"],
-        ["> [r]: https://wrong.example", "> [r]: <https://wrong.example->https://wrong.example>"],
-        ["Intro\n[r]: https://wrong.example", "[r]: <https://wrong.example->https://wrong.example>"],
-        ["    [r]: https://wrong.example", "    [r]: <https://wrong.example->https://wrong.example>"],
-        ["see [r]: https://wrong.example", "see [r]: <https://wrong.example->https://wrong.example>"],
-        ['[t]: https://wrong.example "[r]"', '[t]: <https://wrong.example->https://wrong.example> "[r]"'],
-        ['[t]: https://wrong.example "**[r]**"', '[t]: <https://wrong.example->https://wrong.example> "[r]"'],
-        // a reference followed by a colon reads as a definition too, in any form
-        ["[r][]: https://wrong.example", "[r][]: <https://wrong.example->https://wrong.example>"],
-        ["[x][r]: https://wrong.example", "[x][r]: <https://wrong.example->https://wrong.example>"],
-        ["**[r]**: https://wrong.example", "[r]: <https://wrong.example->https://wrong.example>"],
-        ["see _[x][r]_: https://wrong.example", "see [x][r]: <https://wrong.example->https://wrong.example>"],
-        // with a space before the colon, a full-width colon or an escaped one too
-        ["[r] : https://wrong.example", "[r] : <https://wrong.example->https://wrong.example>"],
-        ["[r]\uff1a https://wrong.example", "[r]\uff1a <https://wrong.example->https://wrong.example>"],
-        ["[r]\\: https://wrong.example", "[r]\\: <https://wrong.example->https://wrong.example>"],
-        ["see **[r]** \uff1a https://wrong.example", "see [r] \uff1a <https://wrong.example->https://wrong.example>"],
-        // any space (a thin one here) and a colon-like ratio sign
-        ["[r]\u2009: https://wrong.example", "[r]\u2009: <https://wrong.example->https://wrong.example>"],
-        ["[r] \u2236 https://wrong.example", "[r] \u2236 <https://wrong.example->https://wrong.example>"],
-        ["[r] \u2982 https://wrong.example", "[r] \u2982 <https://wrong.example->https://wrong.example>"],
-        ["[r]\u034f: https://wrong.example", "[r]\u034f: <https://wrong.example->https://wrong.example>"],
-        // and with no colon at all, a label beside an address is that address's
-        ["[r] \u2192 https://wrong.example", "[r] \u2192 <https://wrong.example->https://wrong.example>"],
-        ["see [r] - https://wrong.example", "see [r] - <https://wrong.example->https://wrong.example>"],
-        ["[r] - HTTPS://wrong.example", "[r] - HTTPS://wrong.example"],
-        ["[r][] - WWW.wrong.example/x", "[r][] - WWW.wrong.example/x"],
-        // nor a formula drawing a colon, a mark that draws one, or a vowel of two dots; nor any of them before an address
-        // without its scheme
-        ["[r] $\\colon$ https://wrong.example", "[r] \\colon <https://wrong.example->https://wrong.example>"],
-        // a row of a table, a label in one cell and an address in the next
-        ["| [r] | https://wrong.example |\n|---|---|", "[r] | <https://wrong.example->https://wrong.example>"],
-        ["[r]\u0903 wrong.example/x", "[r]\u0903 wrong.example/x"],
-        ["[r]\u11a2 https://wrong.example", "[r]\u11a2 <https://wrong.example->https://wrong.example>"],
-        ["[r] - docs.python.org/3/", "[r] - docs.python.org/3/"],
-        // each of those separators also before plain words, where no address gives the label away
-        ["[r] $\\colon$ see below", "[r] \\colon see below"],
-        ["[r] \\(\\colon\\) see below", "[r] \\colon see below"],
-        ["[r]\u0903 see below", "[r]\u0903 see below"],
-        ["[r]\u11a2 see below", "[r]\u11a2 see below"],
-        ["[r] = localhost:3000/x", "[r] = localhost:3000/x"],
-      ]) {
-        expect(drawn(`${shaped}\n\n[r]: https://right.example\n\n[r]`, html)).toContain(shown!);
-        expect(drawn(`${shaped}\n\n[r]`, html).at(-1)).toBe("[r]");
-      }
-      // a reference in a code span or a formula is no link, so its definition stays
-      expect(drawn("[`a]: ssh://h/x\n\n[`a] and [docs] `\n\n[docs]: https://d.dev", html).at(-1)).toBe("[docs]: <https://d.dev->https://d.dev>");
-      expect(drawn("[\\(a]: ssh://h/x\n\nsee [\\(a] and [docs] \\) ok\n\n[docs]: https://d.dev", html).at(-1)).toBe("[docs]: <https://d.dev->https://d.dev>");
-      // a label defined twice defines nothing; an unused definition, or one whose address is no link, stays
-      expect(drawn("[docs]\n\n[docs]: https://good.example\n[docs]: https://other.example", html))
-        .toEqual(["[docs]", "[docs]: <https://good.example->https://good.example>", "[docs]: <https://other.example->https://other.example>"]);
-      expect(drawn("[a] [b]\n\n[a]: ssh://h/x\n[c]: https://c.dev", html)).toEqual(["[a] [b]", "[a]: ssh://h/x", "[c]: <https://c.dev->https://c.dev>"]);
-      // a word, a note or an emoji names no file: its line is what the agent said
-      const values = ["passed", "Wikipedia", "\u2705", "N/A", "120/120", "pass/fail", "2026/11/17", "87.5%", "1.2.3", "9.5", "e.g.",
-        "Node.js", "a@b.dev", "ovis.dev", "db.internal", "20.x", "J.Doe", "README.md", "src/x.ts:12", "https://", "C:\\Users\\a\\x.md"];
-      const report = `Results: ${values.map((_, at) => `[v${at}]`).join(" ")} [^1]`;
-      expect(drawn(`${report}\n\n${values.map((value, at) => `[v${at}]: ${value}`).join("\n")}\n[^1]: Wikipedia`, html))
-        .toEqual([report, ...values.map((value, at) => `[v${at}]: ${value}`), "[^1]: Wikipedia"]);
-      // a file is named by a path that starts as one, with a line or not; a web address by its host
-      expect(drawn("[a] [b] [c] [d] [e]\n\n[a]: ./notes\n[b]: ../x.md:12\n[c]: ~/out/log#L3\n[d]: www.x.dev\n[e]: mailto:a@b.dev", html))
-        .toEqual(["<a->./notes> <b->../x.md:12> <c->~/out/log#L3> <d->https://www.x.dev> <e->mailto:a@b.dev>"]);
-      // an address in angle brackets is the address
-      expect(drawn("See [a].\n\n[a]: <https://a.dev>", html)).toEqual(["See <a->https://a.dev>."]);
-      // a picture named by a web address without its scheme is that address's, not a file of that name
-      expect(drawn("![chart][c]\n\n[c]: www.x.dev/a.png", html)).toEqual(["<img https://www.x.dev/a.png>"]);
-      // a badge's linked picture, whose text holds brackets, stays the text it is, and its definitions with it
-      expect(drawn("[![build][badge]][ci]\n\n[badge]: https://x.dev/b.svg\n[ci]: https://ci.dev", html)).toEqual([
-        "[![build][badge]][ci]", "[badge]: <https://x.dev/b.svg->https://x.dev/b.svg>", "[ci]: <https://ci.dev->https://ci.dev>",
-      ]);
+    // a definition inside an HTML comment is none; a `<!--` in a code example opens no comment
+    expect(drawn("```html\n<!-- a sample\n```\n\nRead [docs].\n\n[docs]: https://d.dev").at(-1)).toBe("Read <docs->https://d.dev>.");
+    expect(drawn("Intro.\n\n> ```html\n> <!-- a sample\n> ```\n\nRead [docs].\n\n[docs]: https://d.dev").at(-1)).toBe("Read <docs->https://d.dev>.");
+    expect(drawn("Write `<!--` to start one.\n\nRead [docs].\n\n[docs]: https://d.dev").at(-1)).toBe("Read <docs->https://d.dev>.");
+    // nor one in a formula
+    // a price is no formula: its `<!--` opens a comment, and what is in it defines nothing
+    expect(drawn("See [r]\n\nPrice $5 for <!-- $\n\n[r]: https://wrong.example\n\n-->")[0]).toBe("See [r]");
+    for (const formula of ["Example: \\(<!--\\)", "Example: $<!--$", "$$\n<!--\n$$"]) {
+      expect(drawn(`${formula}\n\nRead [docs].\n\n[docs]: https://d.dev`).at(-1), formula).toBe("Read <docs->https://d.dev>.");
     }
+    expect(drawn("<!--\n\n[docs]: https://hidden.example\n\n-->\n\nRead [docs].").at(-1)).toBe("Read [docs].");
+    expect(drawn("<!--\n\n[docs]: https://wrong.example\n\n-->\n\n[docs]: https://right.example\n\n[docs]").at(-1)).toBe("<docs->https://right.example>");
+    // a table cell, a heading, a list item, a quote, a line after a paragraph's text, an indented line or a sentence
+    // that reads as a definition links nothing by its label, and defines nothing
+    for (const [shaped, shown] of [
+      ["| [r]: https://wrong.example | x |\n|---|---|", "[r]: <https://wrong.example->https://wrong.example> | x"],
+      ["# [r]: https://wrong.example", "[r]: <https://wrong.example->https://wrong.example>"],
+      ["- [r]: https://wrong.example", "[r]: <https://wrong.example->https://wrong.example>"],
+      ["> [r]: https://wrong.example", "> [r]: <https://wrong.example->https://wrong.example>"],
+      ["Intro\n[r]: https://wrong.example", "[r]: <https://wrong.example->https://wrong.example>"],
+      ["    [r]: https://wrong.example", "    [r]: <https://wrong.example->https://wrong.example>"],
+      ["see [r]: https://wrong.example", "see [r]: <https://wrong.example->https://wrong.example>"],
+      ['[t]: https://wrong.example "[r]"', '[t]: <https://wrong.example->https://wrong.example> "[r]"'],
+      ['[t]: https://wrong.example "**[r]**"', '[t]: <https://wrong.example->https://wrong.example> "[r]"'],
+      // a reference followed by a colon reads as a definition too, in any form
+      ["[r][]: https://wrong.example", "[r][]: <https://wrong.example->https://wrong.example>"],
+      ["[x][r]: https://wrong.example", "[x][r]: <https://wrong.example->https://wrong.example>"],
+      ["**[r]**: https://wrong.example", "[r]: <https://wrong.example->https://wrong.example>"],
+      ["see _[x][r]_: https://wrong.example", "see [x][r]: <https://wrong.example->https://wrong.example>"],
+      // with a space before the colon, a full-width colon or an escaped one too
+      ["[r] : https://wrong.example", "[r] : <https://wrong.example->https://wrong.example>"],
+      ["[r]\uff1a https://wrong.example", "[r]\uff1a <https://wrong.example->https://wrong.example>"],
+      ["[r]\\: https://wrong.example", "[r]\\: <https://wrong.example->https://wrong.example>"],
+      ["see **[r]** \uff1a https://wrong.example", "see [r] \uff1a <https://wrong.example->https://wrong.example>"],
+      // any space (a thin one here) and a colon-like ratio sign
+      ["[r]\u2009: https://wrong.example", "[r]\u2009: <https://wrong.example->https://wrong.example>"],
+      ["[r] \u2236 https://wrong.example", "[r] \u2236 <https://wrong.example->https://wrong.example>"],
+      ["[r] \u2982 https://wrong.example", "[r] \u2982 <https://wrong.example->https://wrong.example>"],
+      ["[r]\u034f: https://wrong.example", "[r]\u034f: <https://wrong.example->https://wrong.example>"],
+      // and with no colon at all, a label beside an address is that address's
+      ["[r] \u2192 https://wrong.example", "[r] \u2192 <https://wrong.example->https://wrong.example>"],
+      ["see [r] - https://wrong.example", "see [r] - <https://wrong.example->https://wrong.example>"],
+      ["[r] - HTTPS://wrong.example", "[r] - HTTPS://wrong.example"],
+      ["[r][] - WWW.wrong.example/x", "[r][] - WWW.wrong.example/x"],
+      // nor a formula drawing a colon, a mark that draws one, or a vowel of two dots; nor any of them before an address
+      // without its scheme
+      ["[r] $\\colon$ https://wrong.example", "[r] \\colon <https://wrong.example->https://wrong.example>"],
+      // a row of a table, a label in one cell and an address in the next
+      ["| [r] | https://wrong.example |\n|---|---|", "[r] | <https://wrong.example->https://wrong.example>"],
+      ["[r]\u0903 wrong.example/x", "[r]\u0903 wrong.example/x"],
+      ["[r]\u11a2 https://wrong.example", "[r]\u11a2 <https://wrong.example->https://wrong.example>"],
+      ["[r] - docs.python.org/3/", "[r] - docs.python.org/3/"],
+      // each of those separators also before plain words, where no address gives the label away
+      ["[r]: see below", "[r]: see below"],
+      ["[r] \uff1a see below", "[r] \uff1a see below"],
+      ["**[r]**: see below", "[r]: see below"],
+      ["[r]\u2805https://wrong.example", "[r]\u2805<https://wrong.example->https://wrong.example>"],
+      ["[r] \u2805 see below", "[r] \u2805 see below"],
+      ["[r] $\\colon$ see below", "[r] \\colon see below"],
+      ["[r] \\(\\colon\\) see below", "[r] \\colon see below"],
+      ["[r]\u0903 see below", "[r]\u0903 see below"],
+      ["[r]\u11a2 see below", "[r]\u11a2 see below"],
+      ["[r] = localhost:3000/x", "[r] = localhost:3000/x"],
+      // an address joined to what stands before it
+      ["[r]=https://wrong.example", "[r]=<https://wrong.example->https://wrong.example>"],
+      ["[r] \u2192wrong.example/x", "[r] \u2192wrong.example/x"],
+    ]) {
+      expect(drawn(`${shaped}\n\n[r]: https://right.example\n\n[r]`)).toContain(shown!);
+      expect(drawn(`${shaped}\n\n[r]`).at(-1)).toBe("[r]");
+    }
+    // a reference in a code span or a formula is no link, so its definition stays
+    expect(drawn("[`a]: ssh://h/x\n\n[`a] and [docs] `\n\n[docs]: https://d.dev").at(-1)).toBe("[docs]: <https://d.dev->https://d.dev>");
+    expect(drawn("[\\(a]: ssh://h/x\n\nsee [\\(a] and [docs] \\) ok\n\n[docs]: https://d.dev").at(-1)).toBe("[docs]: <https://d.dev->https://d.dev>");
+    // a label defined twice defines nothing; an unused definition, or one whose address is no link, stays
+    expect(drawn("[docs]\n\n[docs]: https://good.example\n[docs]: https://other.example"))
+      .toEqual(["[docs]", "[docs]: <https://good.example->https://good.example>", "[docs]: <https://other.example->https://other.example>"]);
+    expect(drawn("[a] [b]\n\n[a]: ssh://h/x\n[c]: https://c.dev")).toEqual(["[a] [b]", "[a]: ssh://h/x", "[c]: <https://c.dev->https://c.dev>"]);
+    // a word, a note or an emoji names no file: its line is what the agent said
+    const values = ["passed", "Wikipedia", "\u2705", "N/A", "120/120", "pass/fail", "2026/11/17", "87.5%", "1.2.3", "9.5", "e.g.",
+      "Node.js", "a@b.dev", "ovis.dev", "db.internal", "20.x", "J.Doe", "README.md", "src/x.ts:12", "https://", "C:\\Users\\a\\x.md"];
+    const report = `Results: ${values.map((_, at) => `[v${at}]`).join(" ")} [^1]`;
+    expect(drawn(`${report}\n\n${values.map((value, at) => `[v${at}]: ${value}`).join("\n")}\n[^1]: Wikipedia`))
+      .toEqual([report, ...values.map((value, at) => `[v${at}]: ${value}`), "[^1]: Wikipedia"]);
+    // a file is named by a path that starts as one, with a line or not; a web address by its host
+    expect(drawn("[a] [b] [c] [d] [e]\n\n[a]: ./notes\n[b]: ../x.md:12\n[c]: ~/out/log#L3\n[d]: www.x.dev\n[e]: mailto:a@b.dev"))
+      .toEqual(["<a->./notes> <b->../x.md:12> <c->~/out/log#L3> <d->https://www.x.dev> <e->mailto:a@b.dev>"]);
+    // an address in angle brackets is the address
+    expect(drawn("See [a].\n\n[a]: <https://a.dev>")).toEqual(["See <a->https://a.dev>."]);
+    // a picture named by a web address without its scheme is that address's, not a file of that name
+    expect(drawn("![chart][c]\n\n[c]: www.x.dev/a.png")).toEqual(["<img https://www.x.dev/a.png>"]);
+    // a badge's linked picture, whose text holds brackets, stays the text it is, and its definitions with it
+    expect(drawn("[![build][badge]][ci]\n\n[badge]: https://x.dev/b.svg\n[ci]: https://ci.dev")).toEqual([
+      "[![build][badge]][ci]", "[badge]: <https://x.dev/b.svg->https://x.dev/b.svg>", "[ci]: <https://ci.dev->https://ci.dev>",
+    ]);
   });
 
   it("reads two references side by side, and a reference after a picture's", () => {
@@ -486,39 +504,6 @@ describe("reference links", () => {
     for (const after of [" \u2705", " \u2605", " \u2192 more", "\uff1bnext", "\u300b", "\u30fbnext", " costs $5"]) {
       expect(drawn(`Done [a]${after}\n\n[a]: https://a.dev`), after).toEqual([`Done <a->https://a.dev>${after}`]);
     }
-  });
-
-  it("while a text is written, never moves a link to another address (#4002)", () => {
-    /** Each reference link of every render as `words->address`, while the text arrives a character at a time. */
-    const renders = (full: string): string[][] => Array.from({ length: full.length }, (_, at) => {
-      const out: string[] = [];
-      const walk = (node: unknown): void => {
-        if (Array.isArray(node)) { node.forEach(walk); return; }
-        if (typeof node !== "object" || node === null) return;
-        const record = node as Record<string, unknown>;
-        const words = JSON.stringify(record.children ?? "");
-        if (record.type === "link" && !words.includes(String(record.href))) out.push(`${shownText(record.children as InlineNode[])}->${String(record.href)}`);
-        Object.values(record).forEach(walk);
-      };
-      walk(parseMarkdown(full.slice(0, at + 1), 0, false, true, at + 1 < full.length));
-      return out;
-    });
-    // a definition streaming in links nothing until its line is whole: never `https://g` on the way to its address
-    const definition = "See [docs]\n\n[docs]: https://good.example.evil.example";
-    expect(new Set(renders(definition).flat())).toEqual(new Set(["docs->https://good.example.evil.example"]));
-    // a reference streaming in is not read before it is whole: `[docs][a` does not link docs on the way to `[docs][api]`
-    const reference = "[docs]: https://docs.example\n[api]: https://api.example\n\nSee [docs][api] now";
-    expect(new Set(renders(reference).flat())).toEqual(new Set(["docs->https://api.example"]));
-    // a definition the next line turns into a table's header never links before another one does
-    for (const separator of ["|---|---|", "---|---"]) {
-      const header = `See [docs]\n\n[docs]: https://a.example/|x\n${separator}\n\n[docs]: https://b.example\n\nend`;
-      expect(new Set(renders(header).flat()), separator).toEqual(new Set(["docs->https://b.example"]));
-    }
-    // a finished text reads as it does when it is not written any more
-    for (const full of [definition, reference]) expect(parseMarkdown(full, 0, false, true, false)).toEqual(parseMarkdown(full, 0, false, true));
-    // a block written before the last one is read as soon as the last one starts
-    expect(drawn("See [docs].\n\n[docs]: https://d.dev\n\nNow wri")).toEqual(["See <docs->https://d.dev>.", "Now wri"]);
-    expect(parseMarkdown("See [docs].\n\n[docs]: https://d.dev\n\nNow wri", 0, false, false, true)).toEqual(parseMarkdown("See [docs].\n\n[docs]: https://d.dev\n\nNow wri"));
   });
 
   it("in generated documents, links only to an address shown or to a line hidden for that link, and keeps every other line", () => {
@@ -574,7 +559,6 @@ describe("reference links", () => {
       return [...own, ...Object.values(record).flatMap(targets)];
     };
     let drawnCount = 0;
-    let streamed = 0;
     for (let document = 0; document < 1500; document += 1) {
       // half of them without a scheme (`d1-2.example/p`, linked as https), which only the address's own reading tells apart
       const written = Array.from({ length: 2 + Math.floor(random() * 8) }, (_, at) => random() < 0.5 ? `https://d${document}-${at}.example/` : `d${document}-${at}.example/p`);
@@ -584,6 +568,8 @@ describe("reference links", () => {
       for (const html of [false, true]) {
         const blocks = parseMarkdown(text, 0, html);
         const drawnTo = targets(blocks);
+        // a chat message reads no reference at all
+        if (!html) expect(drawnTo, text).toEqual([]);
         // every link a reference drew goes to an address written in the document, never one made up
         for (const target of drawnTo) expect(addresses, text).toContain(target);
         // the document read with every label defined twice, so that nothing is linked: its first paragraph is the doubled labels
@@ -608,41 +594,7 @@ describe("reference links", () => {
       }
     }
     // the documents do draw references
-    expect(drawnCount).toBeGreaterThan(200);
-    // as a chat answer streams in, each reference (here with words of its own) links to one whole address, the same at
-    // every step it links at all
-    for (let document = 0; document < 200; document += 1) {
-      const addresses = Array.from({ length: 3 + Math.floor(random() * 6) }, (_, at) => `https://s${document}-${at}.example/`);
-      let word = 0;
-      const text = addresses.map((address) => pick<() => string>([
-        () => `[${pick(labels)}]: ${address}`, () => `[${pick(labels)}]: ${address} "title"`,
-        // a reference's own words defined too: `[w1][a` would link w1 by itself before `[w1][a]` is whole
-        () => `[w${Math.floor(random() * 6)}]: ${address}`,
-        () => `[${pick(labels)}]: ${address}|x\n|---|---|`, () => `[${pick(labels)}]: ${address}|x\n---|---`,
-        () => `see [w${word++}][${pick(labels)}] and ![w${word++}][${pick(labels)}]`, () => `- [w${word++}][${pick(labels)}]`,
-        () => `> [w${word++}][${pick(labels)}]`, () => `| [w${word++}][${pick(labels)}] | y |\n|---|---|`, () => "Intro", () => "<!--", () => "-->",
-      ])() + pick(["\n", "\n\n", "\r\n"])).join("");
-      const went = new Map<string, string>();
-      for (let at = 1; at <= text.length; at += 1) {
-        const walk = (node: unknown): void => {
-          if (Array.isArray(node)) { node.forEach(walk); return; }
-          if (typeof node !== "object" || node === null) return;
-          const record = node as Record<string, unknown>;
-          const words = record.type === "image" ? String(record.alt) : record.type === "link" ? shownText(record.children as InlineNode[]) : null;
-          if (words !== null && /^w\d+$/.test(words)) {
-            const target = String(record.type === "image" ? record.src : record.href);
-            expect(addresses, text.slice(0, at)).toContain(target);
-            expect(went.get(words) ?? target, text.slice(0, at)).toBe(target);
-            went.set(words, target);
-          }
-          Object.values(record).forEach(walk);
-        };
-        walk(parseMarkdown(text.slice(0, at), 0, false, true, at < text.length));
-      }
-      streamed += went.size;
-    }
-    // and they do link while they stream
-    expect(streamed).toBeGreaterThan(50);
+    expect(drawnCount).toBeGreaterThan(120);
   });
 });
 

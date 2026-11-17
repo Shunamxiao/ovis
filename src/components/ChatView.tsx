@@ -909,7 +909,7 @@ function WorkBlockView({ paneId, parts, work, memoryKey, duration, startedAt = n
     <AnimatedHeight open={open} animateContent={false}>
       <div className="work-block-rows" onFocus={keepOpen} onPointerDown={keepOpen}>{visible.map((part) =>
         part.kind === "thinking" ? <ThinkingRow key={`thinking:${at.get(part)}`} stateKey={`thinking:${at.get(part)}`} text={part.text} defaultOpen={expandThinking} />
-          : part.kind === "text" ? <div key={`text:${at.get(part)}`} className="work-narration"><Markdown writing={live && at.get(part) === at.size - 1}>{part.text}</Markdown></div>
+          : part.kind === "text" ? <div key={`text:${at.get(part)}`} className="work-narration"><Markdown>{part.text}</Markdown></div>
             : part.kind === "tool" ? groups.has(part) ? <TodoGroupRow key={groups.get(part)!.id} paneId={paneId} group={groups.get(part)!} stateKeyOf={toolKey} />
               : grouped.has(part) ? null : <WorkRow key={toolKey(part)} stateKey={toolKey(part)} paneId={paneId} part={part} /> : null)}
       </div>
@@ -1378,8 +1378,7 @@ export const Turn = memo(function Turn({ paneId, turn, rowKey, live, waiting, sh
     {head === undefined && live && answer.length === 0 && block(null)}
     {segments.map((segment) => segment.kind === "work" ? block(segment)
       : answerItems(segment.parts, requestDetails).map((item) => item.kind === "text"
-        // only the turn's last part is still being written, and only while the turn runs
-        ? <Markdown key={`answer:${work.at.get(item.part)}`} skills={skills} visualizations writing={live && work.at.get(item.part) === turn.parts.length - 1}>{item.part.text}</Markdown>
+        ? <Markdown key={`answer:${work.at.get(item.part)}`} skills={skills} visualizations>{item.part.text}</Markdown>
         // a later part of the turn is a later request: what the record shows, not whether it was a retry
         : <FailedRequests key={`failed:${work.at.get(item.parts[0]!)}`} at={work.at.get(item.parts[0]!)!} parts={item.parts} followed={work.at.get(item.parts.at(-1)!)! < turn.parts.length - 1} live={live} />))}
     {answerText.length > 0 && <div className="chat-turn-meta chat-agent-meta">
