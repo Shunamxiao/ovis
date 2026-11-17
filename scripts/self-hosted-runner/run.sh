@@ -4,8 +4,7 @@
 # Usage: scripts/self-hosted-runner/run.sh [--repo OWNER/NAME] [--count N] [--labels self-hosted-ovis]
 #          [--reserved N] [--reserved-labels self-hosted-ovis-main] [--env-file FILE] [--build] [--once]
 #          [--cache-dir DIR [--cache-wait SECONDS] | --no-cache] [--build-cache DIR [--build-cache-mb N] [--build-cache-writer LOGIN]]
-#          [--cpuset-cpus LIST] [--cgroup-parent SLICE]
-#          [--work-tmpfs SIZE]
+#          [--cpuset-cpus LIST] [--cgroup-parent SLICE] [--work-tmpfs SIZE] [--offer-when-room]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,9 +27,17 @@ BUILD_CACHE_WRITER=""
 CPUSET=""
 CGROUP_PARENT=""
 WORK_TMPFS=""
+# A runner container is an offer to GitHub: GitHub hands it any job whose labels it matches, so a
+# host that is already busy keeps taking work. --offer-when-room makes a slot that is not reserved
+# wait until this host has room (README "Offering a runner only when there is room").
+OFFER=0
+# The gate's poll interval and its quiet time after a start, in seconds. The tests set them.
+OFFER_POLL="${OVIS_RUNNER_OFFER_POLL:-5}"
+OFFER_PAUSE="${OVIS_RUNNER_OFFER_PAUSE:-30}"
 
 usage() {
-  sed -n '2,8p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  # the header: every comment line after the shebang, up to the first line that is not one
+  sed -n '2,/^[^#]/{/^#/!d;s/^# \{0,1\}//;p}' "${BASH_SOURCE[0]}"
 }
 
 while [ $# -gt 0 ]; do
@@ -52,6 +59,7 @@ while [ $# -gt 0 ]; do
     --cpuset-cpus) CPUSET="${2:?--cpuset-cpus needs a value}"; shift 2 ;;
     --cgroup-parent) CGROUP_PARENT="${2:?--cgroup-parent needs a value}"; shift 2 ;;
     --work-tmpfs) WORK_TMPFS="${2:?--work-tmpfs needs a value}"; shift 2 ;;
+    --offer-when-room) OFFER=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -118,7 +126,7 @@ if [ -n "$ENV_FILE" ]; then
   # number only: its value may be a credential, and stderr ends up in the journal.
   status=0
   # -a: a NUL byte would make grep call the file binary and name no line; -- : a path may start with -
-  bad="$(grep -anvE -e '^[[:space:]]*(#.*)?$|^CHECK_HOST_(MAX_RUNS|TEST_SHARDS|BROWSER_WORKERS|UNIT_WORKERS)=[0-9]+$' -- "$ENV_FILE")" || status=$?
+  bad="$(grep -anvE -e '^[[:space:]]*(#.*)?$|^CHECK_HOST_(MAX_RUNS|TEST_SHARDS|BROWSER_WORKERS|UNIT_WORKERS|OFFER_CPU_PSI|OFFER_MEMORY_PSI)=[0-9]+$' -- "$ENV_FILE")" || status=$?
   case "$status" in
     0) echo "--env-file: $ENV_FILE may hold only CHECK_HOST_*=<number> lines; refused line(s): $(printf '%s\n' "$bad" | cut -d: -f1 | paste -sd, -)" >&2
        exit 2 ;;
@@ -133,6 +141,14 @@ if [ -n "$ENV_FILE" ]; then
   max_runs="$(sed -n 's/^CHECK_HOST_MAX_RUNS=//p' "$ENV_FILE" | tail -n 1)"
   if [ -n "$max_runs" ]; then SLOTS_ENV+=(-e "CHECK_SLOTS_MAX_RUNS=$max_runs"); fi
 fi
+# The offer gate's thresholds: whole percents, read here and by no job (a job's CHECK_MAX_RUNS is what
+# bounds the host's heavy jobs). Unset: that half of the pressure gate does not exist.
+OFFER_CPU_PSI=""
+OFFER_MEMORY_PSI=""
+if [ -n "$ENV_FILE" ]; then
+  OFFER_CPU_PSI="$(sed -n 's/^CHECK_HOST_OFFER_CPU_PSI=//p' "$ENV_FILE" | tail -n 1)"
+  OFFER_MEMORY_PSI="$(sed -n 's/^CHECK_HOST_OFFER_MEMORY_PSI=//p' "$ENV_FILE" | tail -n 1)"
+fi
 
 if [ -z "$REPO" ]; then
   REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
@@ -142,6 +158,34 @@ PREFIX="herdr-ci-${HOST}-"
 SLOTS="${PREFIX}check-slots"
 SLOT_FILES=()
 for port in $(seq 41737 41770); do SLOT_FILES+=("$port"); done
+
+# Runner containers of every launcher on this host, whatever a copy's own PREFIX says.
+PEER_PREFIX="herdr-ci-${HOST}-"
+# The gate's state, host-wide so that the slot loops of every launcher copy decide one at a time: a
+# lock file and the time this host last started a runner container.
+OFFER_STATE="${OVIS_RUNNER_OFFER_DIR:-${XDG_RUNTIME_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}}/ovis-ci-runner}"
+OFFER_LOCK="$OFFER_STATE/offer-$HOST.lock"
+OFFER_STAMP="$OFFER_STATE/offer-$HOST.started"
+# /proc/pressure per resource, "some avg10" in percent. The tests point this elsewhere.
+PSI_DIR="${OVIS_RUNNER_PSI_DIR:-/proc/pressure}"
+if [ "$OFFER" = 1 ]; then
+  case "$OFFER_POLL" in ''|*[!0-9]*|0) echo "OVIS_RUNNER_OFFER_POLL must be a whole number of seconds from 1" >&2; exit 2 ;; esac
+  case "$OFFER_PAUSE" in ''|*[!0-9]*) echo "OVIS_RUNNER_OFFER_PAUSE must be a whole number of seconds" >&2; exit 2 ;; esac
+  if ! command -v flock >/dev/null 2>&1; then
+    echo "--offer-when-room: flock (util-linux) is needed to decide between this host's slot loops" >&2
+    exit 2
+  fi
+  if ! mkdir -p "$OFFER_STATE"; then
+    echo "--offer-when-room: cannot use $OFFER_STATE for the state that keeps this host's slot loops apart (OVIS_RUNNER_OFFER_DIR names another directory)" >&2
+    exit 2
+  fi
+  psi_skipped=()
+  if [ -n "$OFFER_CPU_PSI" ] && [ ! -r "$PSI_DIR/cpu" ]; then psi_skipped+=(CPU); fi
+  if [ -n "$OFFER_MEMORY_PSI" ] && [ ! -r "$PSI_DIR/memory" ]; then psi_skipped+=(memory); fi
+  if [ "${#psi_skipped[@]}" -gt 0 ]; then
+    echo "[offer] PSI is off on this host (no $PSI_DIR/${psi_skipped[0]}): the offer gate skips the ${psi_skipped[*]} pressure" >&2
+  fi
+fi
 
 if [ "$BUILD" = 1 ] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   docker build ${CGROUP_PARENT:+--cgroup-parent "$CGROUP_PARENT"} -t "$IMAGE" "$SCRIPT_DIR"
@@ -499,6 +543,109 @@ slot_network() {
   return 1
 }
 
+# ---------------------------------------------------------------- the offer gate
+# One idle runner per host and pool, at least $OFFER_PAUSE s after this host started a runner, and only
+# while this host's CPU and memory pressure are under its thresholds. A runner counts as running a job
+# while a Runner.Worker process is in it: one still registering is an offer already on its way.
+psi_avg10() {
+  sed -n 's/^some avg10=\([0-9][0-9.]*\).*/\1/p' "$PSI_DIR/$1" 2>/dev/null
+}
+
+psi_under() {
+  awk -v value="$1" -v limit="$2" 'BEGIN { exit !(value + 0 < limit + 0) }'
+}
+
+# Sets OFFER_HOLD to the reason to wait when this host has no room right now.
+offer_room() {
+  local name labels procs youngest="" age value started
+  OFFER_HOLD=""
+  for name in $(docker ps --filter "name=$PEER_PREFIX" --format '{{.Names}}' 2>/dev/null || true); do
+    case "${name#"$PEER_PREFIX"}" in ''|*[!0-9]*) continue ;; esac
+    # seconds since it started, and the command line: a Runner.Worker is a job; one still registering
+    # has none, so the container counts as idle and an offer of this pool is already on its way. A
+    # container whose processes cannot be read is neither: a broken docker top must not stop every
+    # offer this host would make.
+    procs="$(docker top "$name" -eo etimes=,args= 2>/dev/null)" || continue
+    age="$(printf '%s\n' "$procs" | awk '$2 ~ /Runner\.Worker/ && $1 ~ /^[0-9]+$/ { print $1; exit }')"
+    if [ -n "$age" ]; then
+      if [ -z "$youngest" ] || [ "$age" -lt "$youngest" ]; then youngest="$age"; fi
+      continue
+    fi
+    [ "$name" = "$1" ] && continue
+    labels="$(docker container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$name" 2>/dev/null | sed -n 's/^RUNNER_LABELS=//p' || true)"
+    [ "$labels" = "$2" ] || continue
+    OFFER_HOLD="the runner $name of this pool is idle and waiting for a job"
+    return 1
+  done
+  # a job started this host over again: its pressure shows up late, so the next offer waits it out
+  if [ "$OFFER_PAUSE" -gt 0 ] && [ -n "$youngest" ] && [ "$youngest" -lt "$OFFER_PAUSE" ]; then
+    OFFER_HOLD="a job started on this host ${youngest}s ago, less than ${OFFER_PAUSE}s"
+    return 1
+  fi
+  if [ "$OFFER_PAUSE" -gt 0 ] && [ -r "$OFFER_STAMP" ]; then
+    started="$(cat "$OFFER_STAMP" 2>/dev/null || true)"
+    case "$started" in
+      ''|*[!0-9]*) ;;
+      *)
+        age=$(( $(date +%s) - started ))
+        if [ "$age" -lt "$OFFER_PAUSE" ]; then
+          OFFER_HOLD="this host started a runner ${age}s ago, less than ${OFFER_PAUSE}s"
+          return 1
+        fi ;;
+    esac
+  fi
+  if [ -n "$OFFER_CPU_PSI" ]; then
+    value="$(psi_avg10 cpu)"
+    if [ -n "$value" ] && ! psi_under "$value" "$OFFER_CPU_PSI"; then
+      OFFER_HOLD="CPU pressure is ${value}% (this host's limit is under ${OFFER_CPU_PSI}%)"
+      return 1
+    fi
+  fi
+  if [ -n "$OFFER_MEMORY_PSI" ]; then
+    value="$(psi_avg10 memory)"
+    if [ -n "$value" ] && ! psi_under "$value" "$OFFER_MEMORY_PSI"; then
+      OFFER_HOLD="memory pressure is ${value}% (this host's limit is under ${OFFER_MEMORY_PSI}%)"
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# Host-wide, so that the next slot's gate sees this start even before the container shows up.
+offer_record() {
+  printf '%s\n' "$(date +%s)" > "$OFFER_STAMP.new.$$" && mv -f "$OFFER_STAMP.new.$$" "$OFFER_STAMP" 2>/dev/null || true
+}
+
+# Waits for room, then claims it under the host-wide lock and records the start before releasing it.
+offer_wait() {
+  local name="$1" labels="$2" claimed reason=""
+  while true; do
+    if offer_room "$name" "$labels"; then
+      claimed=0
+      {
+        # >> and never >: the lock lives in the file's inode, which a truncation keeps
+        if flock -w 60 9; then
+          if offer_room "$name" "$labels"; then
+            offer_record
+            claimed=1
+          fi
+        else
+          OFFER_HOLD="another slot of this host has held the gate's lock for 60s"
+        fi
+      } 9>>"$OFFER_LOCK"
+      if [ "$claimed" = 1 ]; then
+        [ -z "$reason" ] || echo "[$name] there is room on this host: starting a runner" >&2
+        return 0
+      fi
+    fi
+    if [ "$OFFER_HOLD" != "$reason" ]; then
+      echo "[$name] waiting for room on this host: $OFFER_HOLD" >&2
+      reason="$OFFER_HOLD"
+    fi
+    sleep "$OFFER_POLL"
+  done
+}
+
 slot_loop() {
   local slot="$1" name token container_status running problem labels="$LABELS"
   name="${PREFIX}${slot}"
@@ -513,6 +660,7 @@ slot_loop() {
     done
     sleep 2
     problem=""
+    if [ "$OFFER" = 1 ] && [ "$slot" -gt "$((10#$RESERVED))" ]; then offer_wait "$name" "$labels"; fi
     if ! start_slots; then problem="could not make the check slots in $SLOTS"
     elif ! slot_network "$name-net" "$slot"; then problem="$NETWORK_PROBLEM"
     elif ! token="$(gh api -X POST "repos/$REPO/actions/runners/registration-token" --jq .token)"; then problem="could not fetch a registration token"
@@ -527,6 +675,7 @@ slot_loop() {
     delay=30
     cache_args
     build_cache_args "$name"
+    [ "$OFFER" = 1 ] && offer_record
     if printf '%s\n' "$token" | docker run ${PLACE_ARGS[@]+"${PLACE_ARGS[@]}"} --rm -i \
       --name "$name" \
       --network "$name-net" \
