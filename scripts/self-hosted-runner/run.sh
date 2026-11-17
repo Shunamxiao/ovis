@@ -696,7 +696,8 @@ slot_loop() {
     if [ "$OFFER" = 1 ] && [ "$slot" -gt "$((10#$RESERVED))" ]; then offer_wait "$name" "$labels"; fi
     if ! start_slots; then problem="could not make the check slots in $SLOTS"
     elif ! slot_network "$name-net" "$slot"; then problem="$NETWORK_PROBLEM"
-    elif ! token="$(gh api -X POST "repos/$REPO/actions/runners/registration-token" --jq .token)"; then problem="could not fetch a registration token"
+    # bounded, so an offer claim (ten minutes) always outlives the attempt that made it
+    elif ! token="$(timeout 120 gh api -X POST "repos/$REPO/actions/runners/registration-token" --jq .token)"; then problem="could not fetch a registration token"
     fi
     if [ -n "$problem" ]; then
       rm -f "$OFFER_STATE/offer-$HOST.claim.$name" || true
