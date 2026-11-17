@@ -380,10 +380,15 @@ function inlineLink(inside: string): { destination: string; title?: string } {
 
 /** Dependency-free inline markdown scanner. Unknown or malformed markup remains text. */
 export function parseInline(source: string, links = true, depth = 0): InlineNode[] {
+  // text that reads as a definition links nothing by a reference, in its title's emphasis neither
+  return readInline(source, links, depth, reading !== null && reading.defined.size > 0 && !definitionStart.test(source) ? reading.defined : undefined);
+}
+
+/** `defined`: the definitions a reference in `source` may name; none, so no reference is read. */
+function readInline(source: string, links: boolean, depth: number, defined: ReadonlyMap<string, Definition> | undefined): InlineNode[] {
   if (depth > MAX_INLINE_DEPTH) return source === "" ? [] : [{ type: "text", value: source }];
   const nodes: InlineNode[] = [];
   let offset = 0;
-  const defined = reading !== null && reading.defined.size > 0 && !definitionStart.test(source) ? reading.defined : undefined;
   for (const match of inlineMarks(source, defined)) {
     const index = match.index ?? 0;
     let token = match[0];
@@ -424,17 +429,17 @@ export function parseInline(source: string, links = true, depth = 0): InlineNode
       const { destination: target, title } = token[close + 1] === "(" ? inlineLink(token.slice(close + 2, -1))
         : drawnFrom(defined!, token.slice(close + 2, -1) || label);
       const href = safeMarkdownHref(target) ?? webLikeHref(target);
-      const children = parseInline(label, false, depth);
+      const children = readInline(label, false, depth, undefined);
       const shown: InlineNode = href !== null ? (title ? { type: "link", href, title, children } : { type: "link", href, children })
         : markdownFileNode(target, children) ?? { type: "text", value: label };
       if (image) nodes.push({ type: "image", alt: label, src: target, fallback: [{ type: "text", value: "!" }, shown] });
       else nodes.push(shown);
     } else if (token.startsWith("**") || token.startsWith("__")) {
-      nodes.push({ type: "strong", children: parseInline(token.slice(2, -2), links, depth + 1) });
+      nodes.push({ type: "strong", children: readInline(token.slice(2, -2), links, depth + 1, defined) });
     } else if (token.startsWith("~~")) {
-      nodes.push({ type: "del", children: parseInline(token.slice(2, -2), links, depth + 1) });
+      nodes.push({ type: "del", children: readInline(token.slice(2, -2), links, depth + 1, defined) });
     } else {
-      nodes.push({ type: "em", children: parseInline(token.slice(1, -1), links, depth + 1) });
+      nodes.push({ type: "em", children: readInline(token.slice(1, -1), links, depth + 1, defined) });
     }
     offset = index + token.length;
   }

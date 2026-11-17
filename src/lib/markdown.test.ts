@@ -406,6 +406,7 @@ describe("reference links", () => {
         ["    [r]: https://wrong.example", "    [r]: <https://wrong.example->https://wrong.example>"],
         ["see [r]: https://wrong.example", "see [r]: <https://wrong.example->https://wrong.example>"],
         ['[t]: https://wrong.example "[r]"', '[t]: <https://wrong.example->https://wrong.example> "[r]"'],
+        ['[t]: https://wrong.example "**[r]**"', '[t]: <https://wrong.example->https://wrong.example> "[r]"'],
       ]) {
         expect(drawn(`${shaped}\n\n[r]: https://right.example\n\n[r]`, html)).toContain(shown!);
         expect(drawn(`${shaped}\n\n[r]`, html).at(-1)).toBe("[r]");
@@ -441,6 +442,7 @@ describe("reference links", () => {
     const fragments: Array<(address: string) => string> = [
       (address) => `[${pick(labels)}]${colon} ${address}`,
       (address) => `   [${pick(labels)}]${colon} ${address} "title"`,
+      (address) => `[${pick(labels)}]${colon} ${address} "**[${pick(labels)}]**"`,
       (address) => `    [${pick(labels)}]${colon} ${address}`,
       (address) => `| [${pick(labels)}]${colon} ${address} | x |\n|---|---|`,
       (address) => `# [${pick(labels)}]${colon} ${address}`,
