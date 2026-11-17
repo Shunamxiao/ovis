@@ -315,18 +315,19 @@ export interface Definition { line: number; destination: string; title?: string 
 /** A whole line that reads as a definition: its label, address and title. */
 const definitionLine = /^ {0,3}\[([^[\]\n]+)\]:[ \t]*(\S+)(?:[ \t]+("[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*$/;
 /**
- * What makes a label read as a definition's: a colon after it, ASCII, full-width (as Chinese, Japanese and Korean text writes
- * it) or escaped, after any marks that close emphasis and any spaces.
+ * What makes a label read as a definition's: a colon after it, whatever comes between (marks that close emphasis or open
+ * code, any space or invisible format character, a backslash) and whichever colon it is: ASCII, full-width as Chinese,
+ * Japanese and Korean text writes it, or one of its look-alikes.
  */
-const COLON = String.raw`[*_~]*[ \t\u00a0\u200b\u3000]*\\?[:\uff1a\ufe55]`;
+const COLON = String.raw`(?:[*_~\x60\s\p{Cf}]|\\)*[:\uff1a\ufe55\ufe13\ufe30\u2236\ua789\u02f8\u02d0\u0589\u05c3\u1361\u1804\u205a]`;
 /** Text that begins as a definition does (`[t]: …`, `**[t]** ： …`): it stays the text it is, and links nothing by a reference. */
-const definitionStart = new RegExp(String.raw`^\s*[*_~]*\[[^[\]\n]+\](?:\[[^[\]\n]*\])?${COLON}`);
+const definitionStart = new RegExp(String.raw`^\s*[*_~]*\[[^[\]\n]+\](?:\[[^[\]\n]*\])?${COLON}`, "u");
 /** Whether a colon follows at `at`: what is before it reads as a definition's label. */
 function colonAt(source: string, at: number): boolean {
   colonAfterMarks.lastIndex = at;
   return colonAfterMarks.test(source);
 }
-const colonAfterMarks = new RegExp(COLON, "y");
+const colonAfterMarks = new RegExp(COLON, "yu");
 /** CommonMark's longest label. */
 const LABEL_LIMIT = 999;
 
@@ -358,6 +359,8 @@ let reading: {
   last: number;
   heldFrom: number;
   held: boolean;
+  /** the lines of each fenced code block of the document, from its fence to the line after its end */
+  code: Array<[number, number]>;
 } | null = null;
 
 /**
@@ -367,18 +370,33 @@ let reading: {
  * (`/`, `./`, `../`, `~/`, `file:///`): `[build]: passed`, `[status]: N/A`, `[coverage]: 87.5%`, `[runtime]: Node.js`
  * or `[owner]: a@b.dev` is what an agent reported, and `[a]: README.md` stays as written too.
  */
-function definitions(text: string, found: NonNullable<typeof reading>["found"]): Map<string, Definition> {
+function definitions(text: string, found: NonNullable<typeof reading>["found"], code: ReadonlyArray<[number, number]>): Map<string, Definition> {
+  const lineStarts = [0];
+  for (let at = text.indexOf("\n"); at !== -1; at = text.indexOf("\n", at + 1)) lineStarts.push(at + 1);
+  /** Whether the character at `offset` is in a fenced code block: a `<!--` written there is code, not a comment. */
+  const inCode = (offset: number): boolean => {
+    let low = 0;
+    let high = lineStarts.length - 1;
+    while (low < high) { const middle = (low + high + 1) >> 1; if (lineStarts[middle]! <= offset) low = middle; else high = middle - 1; }
+    let first = 0;
+    let last = code.length - 1;
+    while (first <= last) {
+      const middle = (first + last) >> 1;
+      const [start, end] = code[middle]!;
+      if (low < start) last = middle - 1; else if (low >= end) first = middle + 1; else return true;
+    }
+    return false;
+  };
   const comments: Array<[number, number]> = [];
   for (let from = 0; ;) {
     const open = text.indexOf("<!--", from);
     if (open === -1) break;
+    if (inCode(open)) { from = open + 4; continue; }
     const close = text.indexOf("-->", open + 4);
     comments.push([open, close === -1 ? Infinity : close + 3]);
     if (close === -1) break;
     from = close + 3;
   }
-  const lineStarts = [0];
-  for (let at = text.indexOf("\n"); at !== -1; at = text.indexOf("\n", at + 1)) lineStarts.push(at + 1);
   const defined = new Map<string, Definition | null>();
   let comment = 0;
   for (const { line, text: lineText } of found) {
@@ -680,14 +698,14 @@ const MAX_QUOTE_DEPTH = 32;
 export function parseMarkdown(source: string, depth = 0, html = false, visualizations = false, writing = false): MarkdownBlock[] {
   // a document read inside another's reading gives that reading back when it is done
   const outer = reading;
-  const first: NonNullable<typeof reading> = reading = { found: [], defined: new Map(), used: new Set(), last: 0, heldFrom: Infinity, held: false };
+  const first: NonNullable<typeof reading> = reading = { found: [], defined: new Map(), used: new Set(), last: 0, heldFrom: Infinity, held: false, code: [] };
   try {
     const blocks = readBlocks(source, depth, html, visualizations);
     const text = source.replace(/\r\n?/g, "\n");
     const open = writing ? text.split("\n").length - 1 : -1;
-    const defined = definitions(text, first.found.filter(({ line }) => line !== open));
+    const defined = definitions(text, first.found.filter(({ line }) => line !== open), first.code);
     if (defined.size === 0) return blocks;
-    const second: NonNullable<typeof reading> = reading = { found: [], defined, used: new Set(), last: 0, heldFrom: writing ? first.last : Infinity, held: false };
+    const second: NonNullable<typeof reading> = reading = { found: [], defined, used: new Set(), last: 0, heldFrom: writing ? first.last : Infinity, held: false, code: [] };
     const linked = readBlocks(source, depth, html, visualizations);
     const hidden = new Set(second.found.filter(({ line }) => second.used.has(line)).map(({ nodes }) => nodes));
     return linked.flatMap((block): MarkdownBlock[] => {
@@ -731,12 +749,14 @@ function readBlocks(source: string, depth: number, html: boolean, visualizations
     if (fence !== null) {
       const indent = fence[1] ?? "";
       const body: string[] = [];
+      const opened = index;
       index += 1;
       while (index < lines.length && !/^\s{0,3}```\s*$/.test(lineAt(lines, index))) {
         const bodyLine = lineAt(lines, index++);
         body.push(bodyLine.startsWith(indent) ? bodyLine.slice(indent.length) : bodyLine.trimStart());
       }
       if (index < lines.length) index += 1;
+      if (depth === 0) reading!.code.push([opened, index]);
       blocks.push({ type: "code", language: fence[2] ?? "", value: body.join("\n") });
       continue;
     }

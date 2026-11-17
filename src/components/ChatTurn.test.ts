@@ -64,6 +64,12 @@ describe("reference links in an answer being written", () => {
     expect(html).not.toMatch(linked("api"));
     expect(html).toContain("Now [api][a");
   });
+
+  it("holds the words a running turn is writing between its tools too, and reads them once it is done", () => {
+    const parts: ConversationPart[] = [tool("ls"), { kind: "text", text: `${defined}Still on [docs][a`, phase: "commentary" }];
+    expect(render(parts, { live: true })).not.toMatch(linked("docs"));
+    expect(render(parts, { live: false })).toMatch(linked("docs"));
+  });
 });
 
 describe("an agent turn's work blocks", () => {

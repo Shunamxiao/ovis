@@ -127,7 +127,7 @@ function OmpBtwChip({ paneId }: { paneId: string }) {
     const said = state(exchange);
     return <div key={index} className="btw-exchange">
       <p className="btw-question">{exchange.question}</p>
-      {exchange.answer.trim().length > 0 && <Markdown className="btw-answer">{exchange.answer}</Markdown>}
+      {exchange.answer.trim().length > 0 && <Markdown className="btw-answer" writing={exchange.status === "running"}>{exchange.answer}</Markdown>}
       {said && <p className="btw-state">{said}</p>}
     </div>;
   };

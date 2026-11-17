@@ -392,7 +392,8 @@ describe("reference links", () => {
 
   it("hides no line a link was not drawn from, and links no label by text that reads as a definition (#4002)", () => {
     for (const html of [false, true]) {
-      // a definition inside an HTML comment is none
+      // a definition inside an HTML comment is none; a `<!--` in a code example opens no comment
+      expect(drawn("```html\n<!-- a sample\n```\n\nRead [docs].\n\n[docs]: https://d.dev", html).at(-1)).toBe("Read <docs->https://d.dev>.");
       expect(drawn("<!--\n\n[docs]: https://hidden.example\n\n-->\n\nRead [docs].", html).at(-1)).toBe("Read [docs].");
       expect(drawn("<!--\n\n[docs]: https://wrong.example\n\n-->\n\n[docs]: https://right.example\n\n[docs]", html).at(-1)).toBe("<docs->https://right.example>");
       // a table cell, a heading, a list item, a quote, a line after a paragraph's text, an indented line or a sentence
@@ -417,6 +418,9 @@ describe("reference links", () => {
         ["[r]\uff1a https://wrong.example", "[r]\uff1a <https://wrong.example->https://wrong.example>"],
         ["[r]\\: https://wrong.example", "[r]\\: <https://wrong.example->https://wrong.example>"],
         ["see **[r]** \uff1a https://wrong.example", "see [r] \uff1a <https://wrong.example->https://wrong.example>"],
+        // any space (a thin one here) and a colon-like ratio sign
+        ["[r]\u2009: https://wrong.example", "[r]\u2009: <https://wrong.example->https://wrong.example>"],
+        ["[r] \u2236 https://wrong.example", "[r] \u2236 <https://wrong.example->https://wrong.example>"],
       ]) {
         expect(drawn(`${shaped}\n\n[r]: https://right.example\n\n[r]`, html)).toContain(shown!);
         expect(drawn(`${shaped}\n\n[r]`, html).at(-1)).toBe("[r]");
@@ -490,8 +494,9 @@ describe("reference links", () => {
     };
     const pick = <T,>(items: readonly T[]): T => items[Math.floor(random() * items.length)]!;
     const labels = ["a", "b", "Docs"];
-    // a definition's colon, and the forms that only look like one
-    const colon = (): string => pick([":", ":", ":", " :", "\uff1a", "\\:"]);
+    // a definition's colon, and what only reads as one: written here apart from the parser's own pattern
+    const colon = (): string => random() < 0.5 ? ":" : pick([" :", "\t:", "\u202f:", "\u2009:", "\u2060:", "\ufeff:", "\u200d:", "\uff1a", " \uff1a", "\ufe55",
+      "\u2236", " \u2236", "\ufe30", "\ua789", "\u02f8", "\u02d0", "\\:", "\\ :", "\\\\:", " **:**", " `:`", "\u3000:", "\u00a0:"]);
     const fragments: Array<(address: string) => string> = [
       (address) => `[${pick(labels)}]${colon()} ${address}`,
       (address) => `   [${pick(labels)}]${colon()} ${address} "title"`,
@@ -529,7 +534,8 @@ describe("reference links", () => {
         : record.type === "link" && read([record as InlineNode]).startsWith("⟦") ? [String(record.href)] : [];
       return [...own, ...Object.values(record).flatMap(targets)];
     };
-    const COLON_AFTER = /⟧[*_~]*[ \t\u00a0\u3000]*\\?[:\uff1a]/;
+    // after a reference's words: any marks, spaces, invisible characters or backslashes, then anything a reader takes for a colon
+    const COLON_AFTER = /⟧(?:[*_~`\s\p{Cf}]|\\)*[:\uff1a\ufe55\ufe13\ufe30\u2236\ua789\u02f8\u02d0\u0589\u05c3\u1361\u1804\u205a]/u;
     let drawnCount = 0;
     let streamed = 0;
     for (let document = 0; document < 1500; document += 1) {
@@ -547,27 +553,54 @@ describe("reference links", () => {
         // a reference before a colon reads as a definition, and so does a line that starts as one: neither links its label
         for (const line of lines(blocks)) {
           expect(COLON_AFTER.test(line), `${line} in ${JSON.stringify(text)}`).toBe(false);
-          if (/^\s*[*_~]*\[[^[\]]+\](?:\[[^[\]]*\])?[*_~]*[ \t]*\\?[:\uff1a]/.test(line)) expect(line, text).not.toContain("⟦");
+          if (/^\s*[*_~]*\[[^[\]]+\](?:\[[^[\]]*\])?(?:[*_~`\s\p{Cf}]|\\)*[:\uff1a\ufe55\ufe13\ufe30\u2236\ua789\u02f8\u02d0\u0589\u05c3\u1361\u1804\u205a]/u.test(line)) expect(line, text).not.toContain("⟦");
         }
         for (const target of new Set(drawnTo)) {
-          // no definition is taken inside an HTML comment
+          // no definition is taken inside an HTML comment (one in a code example opens none: those are left to the explicit tests)
           const before = text.slice(0, text.indexOf(target));
-          expect(before.lastIndexOf("<!--") <= before.lastIndexOf("-->"), text).toBe(true);
+          if (!before.includes("```")) expect(before.lastIndexOf("<!--") <= before.lastIndexOf("-->"), text).toBe(true);
           // a label defined a second time defines nothing: written again first, its references link nowhere
           const label = /^ {0,3}\[([^[\]]+)\]/.exec(text.slice(text.lastIndexOf("\n", text.indexOf(target)) + 1))![1]!;
           expect(targets(parseMarkdown(`[${label}]: https://first.example/\n\n${text}`, 0, html)), text).not.toContainAnyValues([target, "https://first.example/"]);
         }
         drawnCount += drawnTo.length;
       }
-      // as it streams in, a chat answer links only to whole addresses
-      if (document % 15 === 0) {
-        for (let at = 1; at < text.length; at += 1) for (const target of targets(parseMarkdown(text.slice(0, at), 0, false, true, true))) expect(addresses, text.slice(0, at)).toContain(target);
-        streamed += 1;
-      }
     }
     // the documents do draw references
     expect(drawnCount).toBeGreaterThan(250);
-    expect(streamed).toBe(100);
+    // as a chat answer streams in, each reference (here with words of its own) links to one whole address, the same at
+    // every step it links at all
+    for (let document = 0; document < 200; document += 1) {
+      const addresses = Array.from({ length: 3 + Math.floor(random() * 6) }, (_, at) => `https://s${document}-${at}.example/`);
+      let word = 0;
+      const text = addresses.map((address) => pick<() => string>([
+        () => `[${pick(labels)}]: ${address}`, () => `[${pick(labels)}]: ${address} "title"`,
+        // a reference's own words defined too: `[w1][a` would link w1 by itself before `[w1][a]` is whole
+        () => `[w${Math.floor(random() * 6)}]: ${address}`,
+        () => `see [w${word++}][${pick(labels)}] and ![w${word++}][${pick(labels)}]`, () => `- [w${word++}][${pick(labels)}]`,
+        () => `> [w${word++}][${pick(labels)}]`, () => `| [w${word++}][${pick(labels)}] | y |\n|---|---|`, () => "Intro", () => "<!--", () => "-->",
+      ])() + pick(["\n", "\n\n", "\r\n"])).join("");
+      const went = new Map<string, string>();
+      for (let at = 1; at <= text.length; at += 1) {
+        const walk = (node: unknown): void => {
+          if (Array.isArray(node)) { node.forEach(walk); return; }
+          if (typeof node !== "object" || node === null) return;
+          const record = node as Record<string, unknown>;
+          const words = record.type === "image" ? String(record.alt) : record.type === "link" ? shownText(record.children as InlineNode[]) : null;
+          if (words !== null && /^w\d+$/.test(words)) {
+            const target = String(record.type === "image" ? record.src : record.href);
+            expect(addresses, text.slice(0, at)).toContain(target);
+            expect(went.get(words) ?? target, text.slice(0, at)).toBe(target);
+            went.set(words, target);
+          }
+          Object.values(record).forEach(walk);
+        };
+        walk(parseMarkdown(text.slice(0, at), 0, false, true, at < text.length));
+      }
+      streamed += went.size;
+    }
+    // and they do link while they stream
+    expect(streamed).toBeGreaterThan(50);
   });
 });
 
