@@ -407,6 +407,11 @@ describe("reference links", () => {
         ["see [r]: https://wrong.example", "see [r]: <https://wrong.example->https://wrong.example>"],
         ['[t]: https://wrong.example "[r]"', '[t]: <https://wrong.example->https://wrong.example> "[r]"'],
         ['[t]: https://wrong.example "**[r]**"', '[t]: <https://wrong.example->https://wrong.example> "[r]"'],
+        // a reference followed by a colon reads as a definition too, in any form
+        ["[r][]: https://wrong.example", "[r][]: <https://wrong.example->https://wrong.example>"],
+        ["[x][r]: https://wrong.example", "[x][r]: <https://wrong.example->https://wrong.example>"],
+        ["**[r]**: https://wrong.example", "[r]: <https://wrong.example->https://wrong.example>"],
+        ["see _[x][r]_: https://wrong.example", "see [x][r]: <https://wrong.example->https://wrong.example>"],
       ]) {
         expect(drawn(`${shaped}\n\n[r]: https://right.example\n\n[r]`, html)).toContain(shown!);
         expect(drawn(`${shaped}\n\n[r]`, html).at(-1)).toBe("[r]");
@@ -419,13 +424,14 @@ describe("reference links", () => {
         .toEqual(["[docs]", "[docs]: <https://good.example->https://good.example>", "[docs]: <https://other.example->https://other.example>"]);
       expect(drawn("[a] [b]\n\n[a]: ssh://h/x\n[c]: https://c.dev", html)).toEqual(["[a] [b]", "[a]: ssh://h/x", "[c]: <https://c.dev->https://c.dev>"]);
       // a word, a note or an emoji names no file: its line is what the agent said
-      const values = ["passed", "Wikipedia", "\u2705", "N/A", "120/120", "pass/fail", "2026/11/17", "87.5%", "1.2.3", "9.5", "e.g."];
+      const values = ["passed", "Wikipedia", "\u2705", "N/A", "120/120", "pass/fail", "2026/11/17", "87.5%", "1.2.3", "9.5", "e.g.",
+        "Node.js", "a@b.dev", "ovis.dev", "db.internal", "20.x", "J.Doe", "README.md", "src/x.ts:12", "https://", "C:\\Users\\a\\x.md"];
       const report = `Results: ${values.map((_, at) => `[v${at}]`).join(" ")} [^1]`;
       expect(drawn(`${report}\n\n${values.map((value, at) => `[v${at}]: ${value}`).join("\n")}\n[^1]: Wikipedia`, html))
         .toEqual([report, ...values.map((value, at) => `[v${at}]: ${value}`), "[^1]: Wikipedia"]);
-      // a file is named by a path that starts as one, or by its extension, with a line or not
-      expect(drawn("[a] [b] [c] [d] [e]\n\n[a]: README.md\n[b]: src/x.ts\n[c]: x.ts:12\n[d]: ./notes\n[e]: ~/out/log#L3", html))
-        .toEqual(["<a->README.md> <b->src/x.ts> <c->x.ts:12> <d->./notes> <e->~/out/log#L3>"]);
+      // a file is named by a path that starts as one, with a line or not; a web address by its host
+      expect(drawn("[a] [b] [c] [d] [e]\n\n[a]: ./notes\n[b]: ../x.md:12\n[c]: ~/out/log#L3\n[d]: www.x.dev\n[e]: mailto:a@b.dev", html))
+        .toEqual(["<a->./notes> <b->../x.md:12> <c->~/out/log#L3> <d->https://www.x.dev> <e->mailto:a@b.dev>"]);
       // an address in angle brackets is the address
       expect(drawn("See [a].\n\n[a]: <https://a.dev>", html)).toEqual(["See <a->https://a.dev>."]);
       // a badge's linked picture, whose text holds brackets, stays the text it is, and its definitions with it
@@ -447,12 +453,13 @@ describe("reference links", () => {
     const pick = <T,>(items: readonly T[]): T => items[Math.floor(random() * items.length)]!;
     const labels = ["a", "b", "Docs"];
     // each fragment written as a definition gets an address of its own; its colon is written as `colon`, to be ":",
-    // or "=" for the same document without definitions
+    // or, for the same document without definitions, a character no markdown reads
     const colon = "\u0001";
     const fragments: Array<(address: string) => string> = [
       (address) => `[${pick(labels)}]${colon} ${address}`,
       (address) => `   [${pick(labels)}]${colon} ${address} "title"`,
       (address) => `[${pick(labels)}]${colon} ${address} "**[${pick(labels)}]**"`,
+      (address) => `[x][${pick(labels)}]${colon} ${address}`, (address) => `**[${pick(labels)}]**${colon} ${address}`,
       (address) => `    [${pick(labels)}]${colon} ${address}`,
       (address) => `| [${pick(labels)}]${colon} ${address} | x |\n|---|---|`,
       (address) => `# [${pick(labels)}]${colon} ${address}`,
@@ -481,22 +488,22 @@ describe("reference links", () => {
       return [...own, ...keys.flatMap((key) => referenced(record[key]))];
     };
     let checked = 0;
-    for (let document = 0; document < 1500; document += 1) {
+    for (let document = 0; document < 2000; document += 1) {
       const addresses = Array.from({ length: 2 + Math.floor(random() * 8) }, (_, at) => `https://d${document}-${at}.example/`);
       const text = addresses.map((address) => pick(fragments)(address) + pick(["\n", "\n\n"])).join("");
       const write = (written: string): string => text.replaceAll(colon, written);
       for (const html of [false, true]) {
         const blocks = parseMarkdown(write(":"), 0, html);
-        const without = parseMarkdown(write("="), 0, html);
+        const without = parseMarkdown(write("\u0002"), 0, html);
         const shown = visible(blocks);
         const hidden = addresses.filter((address) => visible(without).includes(address) && !shown.includes(address));
         const links = referenced(blocks).filter((href) => addresses.includes(href));
         // every line left out is one a drawn link or picture came from, and every one of them drew from a line left out
         expect(new Set(links)).toEqual(new Set(hidden));
         // text that reads as a definition and stays shows its label as written: no reference linked it
-        for (const address of addresses) if (shown.includes(address)) expect(shown).toContain(`]: ${address}`);
+        for (const address of addresses) if (shown.includes(address)) expect(["]", "]**"].some((close) => shown.includes(`${close}: ${address}`)), address).toBe(true);
         // with no reference drawn, the document reads as it did with no definition in it
-        if (links.length === 0) expect(JSON.stringify(blocks)).toBe(JSON.stringify(without).replaceAll("]=", "]:"));
+        if (links.length === 0) expect(JSON.stringify(blocks)).toBe(JSON.stringify(without).replaceAll("\\u0002", ":"));
         checked += links.length;
       }
     }

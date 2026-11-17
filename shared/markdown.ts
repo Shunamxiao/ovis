@@ -289,10 +289,10 @@ export function* inlineMarks(source: string, defined?: ReadonlyMap<string, Defin
     pattern.lastIndex = start;
     const match = pattern.exec(source);
     if (match === null) continue;
-    // a reference needs its label defined; `[label]:` is how a definition reads, so it is no reference; and one right
-    // after a bracket or a backslash is part of what this reader leaves as text: a badge's linked picture
-    // (`[![build][badge]][ci]`), `[[x]]`, `\[x]`
-    if (pattern === reference && (!defined!.has(referenceLabel(match)) || (match[2] === undefined && source[start + match[0].length] === ":")
+    // a reference needs its label defined; one followed by `:` reads as a definition (`[r]:`, `[x][r]:`, `[r][]**:`), so it
+    // is none; and one right after a bracket or a backslash is part of what this reader leaves as text: a badge's linked
+    // picture (`[![build][badge]][ci]`), `[[x]]`, `\[x]`
+    if (pattern === reference && (!defined!.has(referenceLabel(match)) || colonAt(source, start + match[0].length)
       || /[[\]\\]/.test(source[start - (source[start - 1] === "!" ? 2 : 1)] ?? ""))) continue;
     // a price, not a formula: `$5 for the $` (a number, a space, then a word) stays text
     if (char === "$" && /^\$\d[\d.,]*\s+\p{L}/u.test(match[0])) continue;
@@ -311,6 +311,12 @@ export interface Definition { line: number; destination: string; title?: string 
 const definitionLine = /^ {0,3}\[([^[\]\n]+)\]:[ \t]*(\S+)(?:[ \t]+("[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*$/;
 /** Text that begins as a definition does: it stays the text it is, and links nothing by a reference. */
 const definitionStart = /^\s*\[[^[\]\n]+\]:/;
+/** Whether a `:` follows at `at`, after any marks that close emphasis: what is before it reads as a definition's label. */
+function colonAt(source: string, at: number): boolean {
+  colonAfterMarks.lastIndex = at;
+  return colonAfterMarks.test(source);
+}
+const colonAfterMarks = /[*_~]*:/y;
 /** CommonMark's longest label. */
 const LABEL_LIMIT = 999;
 
@@ -343,9 +349,9 @@ let reading: {
 /**
  * The definitions among `found` that references may resolve to. A label defined twice defines nothing, and neither does
  * a line inside an HTML comment (an earlier `<!--` that no `-->` closed, wherever it is written) or an address that
- * cannot be a link: their lines stay the text they are. A file is named by a path that starts as one (`/`, `./`, `~/`,
- * `C:\`) or ends in an extension: `[build]: passed`, `[status]: N/A`, `[test]: 120/120` or `[coverage]: 87.5%` is what
- * an agent reported, not a file.
+ * cannot be a link: their lines stay the text they are. A web address needs a host, and a file a path that starts as one
+ * (`/`, `./`, `../`, `~/`, `file:///`): `[build]: passed`, `[status]: N/A`, `[coverage]: 87.5%`, `[runtime]: Node.js`
+ * or `[owner]: a@b.dev` is what an agent reported, and `[a]: README.md` stays as written too.
  */
 function definitions(text: string, found: NonNullable<typeof reading>["found"]): Map<string, Definition> {
   const comments: Array<[number, number]> = [];
@@ -370,9 +376,8 @@ function definitions(text: string, found: NonNullable<typeof reading>["found"]):
     if (key === "") continue;
     // `<https://x.dev>`: CommonMark's address in angle brackets
     const destination = /^<(.+)>$/.exec(address)?.[1] ?? address;
-    const linkable = (safeMarkdownHref(destination) ?? webLikeHref(destination)) !== null
-      || (markdownFileTarget(destination) !== null && (/^(?:\.{0,2}\/|~\/|[A-Za-z]:[\\/]|file:)/i.test(destination)
-        || /\.[A-Za-z][\w-]*(?:#L\d+(?:-L?\d+)?|(?::\d+){1,2})?$/.test(destination)));
+    const linkable = /^(?:https?:\/\/[^\s/?#]|mailto:\S)/i.test(destination) || webLikeHref(destination) !== null
+      || (/^(?:\.{0,2}\/|~\/|file:\/\/\/)/i.test(destination) && markdownFileTarget(destination) !== null);
     defined.set(key, defined.has(key) || !linkable ? null : { line, destination, ...(title ? { title: title.slice(1, -1) } : {}) });
   }
   return new Map([...defined].filter((entry): entry is [string, Definition] => entry[1] !== null));
@@ -398,6 +403,8 @@ function readInline(source: string, links: boolean, depth: number, defined: Read
   for (const match of inlineMarks(source, defined)) {
     const index = match.index ?? 0;
     let token = match[0];
+    // emphasis followed by `:` (`**[r]**: …`) reads as a definition's label: what is in it is no reference
+    const inner = defined !== undefined && colonAt(source, index + token.length) ? undefined : defined;
     // the `!` of an image stays in the text before its bracket
     const image = token.startsWith("[") && index > offset && source[index - 1] === "!";
     const textEnd = image ? index - 1 : index;
@@ -441,11 +448,11 @@ function readInline(source: string, links: boolean, depth: number, defined: Read
       if (image) nodes.push({ type: "image", alt: label, src: target, fallback: [{ type: "text", value: "!" }, shown] });
       else nodes.push(shown);
     } else if (token.startsWith("**") || token.startsWith("__")) {
-      nodes.push({ type: "strong", children: readInline(token.slice(2, -2), links, depth + 1, defined) });
+      nodes.push({ type: "strong", children: readInline(token.slice(2, -2), links, depth + 1, inner) });
     } else if (token.startsWith("~~")) {
-      nodes.push({ type: "del", children: readInline(token.slice(2, -2), links, depth + 1, defined) });
+      nodes.push({ type: "del", children: readInline(token.slice(2, -2), links, depth + 1, inner) });
     } else {
-      nodes.push({ type: "em", children: readInline(token.slice(1, -1), links, depth + 1, defined) });
+      nodes.push({ type: "em", children: readInline(token.slice(1, -1), links, depth + 1, inner) });
     }
     offset = index + token.length;
   }
