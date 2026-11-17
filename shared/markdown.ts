@@ -257,6 +257,8 @@ export function* inlineMarks(source: string, defined?: ReadonlyMap<string, Defin
     return close !== null && source[close] === (quote === "(" ? ")" : quote) && source[close + 1] === ")";
   };
   let from = 0;
+  // where the last mark found ends: a `]` there closed it, not a bracket around what follows
+  let ended = -1;
   for (;;) {
     opener.lastIndex = from;
     const start = opener.exec(source)?.index;
@@ -289,14 +291,17 @@ export function* inlineMarks(source: string, defined?: ReadonlyMap<string, Defin
     pattern.lastIndex = start;
     const match = pattern.exec(source);
     if (match === null) continue;
-    // a reference needs its label defined; one followed by `:` reads as a definition (`[r]:`, `[x][r]:`, `[r][]**:`), so it
-    // is none; and one right after a bracket or a backslash is part of what this reader leaves as text: a badge's linked
-    // picture (`[![build][badge]][ci]`), `[[x]]`, `\[x]`
+    // a reference needs its label defined; one followed by a colon reads as a definition (`[r]:`, `[x][r] :`, `[r][]**：`),
+    // so it is none; and one right after a bracket or a backslash is part of what this reader leaves as text: a badge's
+    // linked picture (`[![build][badge]][ci]`), `[[x]]`, `\[x]`. A `]` that ended the mark before is no such bracket:
+    // `[one][a][two][b]` is two references
+    const before = start - (source[start - 1] === "!" ? 1 : 0);
     if (pattern === reference && (!defined!.has(referenceLabel(match)) || colonAt(source, start + match[0].length)
-      || /[[\]\\]/.test(source[start - (source[start - 1] === "!" ? 2 : 1)] ?? ""))) continue;
+      || /[[\\]/.test(source[before - 1] ?? "") || (source[before - 1] === "]" && before !== ended))) continue;
     // a price, not a formula: `$5 for the $` (a number, a space, then a word) stays text
     if (char === "$" && /^\$\d[\d.,]*\s+\p{L}/u.test(match[0])) continue;
     from = start + match[0].length;
+    ended = from;
     yield match;
   }
 }
@@ -309,14 +314,19 @@ export interface Definition { line: number; destination: string; title?: string 
 
 /** A whole line that reads as a definition: its label, address and title. */
 const definitionLine = /^ {0,3}\[([^[\]\n]+)\]:[ \t]*(\S+)(?:[ \t]+("[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*$/;
-/** Text that begins as a definition does: it stays the text it is, and links nothing by a reference. */
-const definitionStart = /^\s*\[[^[\]\n]+\]:/;
-/** Whether a `:` follows at `at`, after any marks that close emphasis: what is before it reads as a definition's label. */
+/**
+ * What makes a label read as a definition's: a colon after it, ASCII, full-width (as Chinese, Japanese and Korean text writes
+ * it) or escaped, after any marks that close emphasis and any spaces.
+ */
+const COLON = String.raw`[*_~]*[ \t\u00a0\u200b\u3000]*\\?[:\uff1a\ufe55]`;
+/** Text that begins as a definition does (`[t]: …`, `**[t]** ： …`): it stays the text it is, and links nothing by a reference. */
+const definitionStart = new RegExp(String.raw`^\s*[*_~]*\[[^[\]\n]+\](?:\[[^[\]\n]*\])?${COLON}`);
+/** Whether a colon follows at `at`: what is before it reads as a definition's label. */
 function colonAt(source: string, at: number): boolean {
   colonAfterMarks.lastIndex = at;
   return colonAfterMarks.test(source);
 }
-const colonAfterMarks = /[*_~]*:/y;
+const colonAfterMarks = new RegExp(COLON, "y");
 /** CommonMark's longest label. */
 const LABEL_LIMIT = 999;
 
@@ -338,12 +348,16 @@ function drawnFrom(defined: ReadonlyMap<string, Definition>, label: string): Def
 /**
  * The document `parseMarkdown` is reading, while it reads it. `found`: each line opening a paragraph of the document that
  * reads as a definition, in order, with what was drawn for it; `defined`: the definitions references resolve to; `used`:
- * the line of each definition a reference drew a link or a picture from.
+ * the line of each definition a reference drew a link or a picture from; `last`: the line the document's last block starts
+ * at; `held`: whether no reference is read where the reader is now, the last block of a text still being written.
  */
 let reading: {
   found: Array<{ line: number; text: string; nodes: InlineNode[] }>;
   defined: ReadonlyMap<string, Definition>;
   used: Set<number>;
+  last: number;
+  heldFrom: number;
+  held: boolean;
 } | null = null;
 
 /**
@@ -392,7 +406,7 @@ function inlineLink(inside: string): { destination: string; title?: string } {
 /** Dependency-free inline markdown scanner. Unknown or malformed markup remains text. */
 export function parseInline(source: string, links = true, depth = 0): InlineNode[] {
   // text that reads as a definition links nothing by a reference, in its title's emphasis neither
-  return readInline(source, links, depth, reading !== null && reading.defined.size > 0 && !definitionStart.test(source) ? reading.defined : undefined);
+  return readInline(source, links, depth, reading !== null && !reading.held && reading.defined.size > 0 && !definitionStart.test(source) ? reading.defined : undefined);
 }
 
 /** `defined`: the definitions a reference in `source` may name; none, so no reference is read. */
@@ -659,16 +673,21 @@ const MAX_QUOTE_DEPTH = 32;
  * `html`: a file's markdown, whose HTML blocks are read as markdown (markdownHtml.ts); an agent's text keeps them as text.
  * A document with reference definitions is read twice: once to find them, then with its references drawn as links. A
  * definition's line is left out only when a reference drew from it; any other stays as written.
+ * `writing`: the text is still being written (a chat answer as it streams in), so its last line may stop mid-address and
+ * its last block may still change what a reference says (`[docs][a` becomes `[docs][api]`): that line defines nothing
+ * and no reference in that block is read, until more of the text arrives or it is done. No link then changes its address.
  */
-export function parseMarkdown(source: string, depth = 0, html = false, visualizations = false): MarkdownBlock[] {
+export function parseMarkdown(source: string, depth = 0, html = false, visualizations = false, writing = false): MarkdownBlock[] {
   // a document read inside another's reading gives that reading back when it is done
   const outer = reading;
-  reading = { found: [], defined: new Map(), used: new Set() };
+  const first: NonNullable<typeof reading> = reading = { found: [], defined: new Map(), used: new Set(), last: 0, heldFrom: Infinity, held: false };
   try {
     const blocks = readBlocks(source, depth, html, visualizations);
-    const defined = definitions(source.replace(/\r\n?/g, "\n"), reading.found);
+    const text = source.replace(/\r\n?/g, "\n");
+    const open = writing ? text.split("\n").length - 1 : -1;
+    const defined = definitions(text, first.found.filter(({ line }) => line !== open));
     if (defined.size === 0) return blocks;
-    const second: NonNullable<typeof reading> = reading = { found: [], defined, used: new Set() };
+    const second: NonNullable<typeof reading> = reading = { found: [], defined, used: new Set(), last: 0, heldFrom: writing ? first.last : Infinity, held: false };
     const linked = readBlocks(source, depth, html, visualizations);
     const hidden = new Set(second.found.filter(({ line }) => second.used.has(line)).map(({ nodes }) => nodes));
     return linked.flatMap((block): MarkdownBlock[] => {
@@ -694,6 +713,11 @@ function readBlocks(source: string, depth: number, html: boolean, visualizations
   while (index < lines.length) {
     const line = lineAt(lines, index);
     if (line.trim() === "") { index += 1; continue; }
+    // a block of the document starts here
+    if (depth === 0) {
+      reading!.last = index;
+      reading!.held = index >= reading!.heldFrom;
+    }
 
     const visualization = visualizations ? visualizationReference(line) : null;
     if (visualization !== null) {

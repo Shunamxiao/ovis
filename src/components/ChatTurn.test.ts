@@ -44,6 +44,28 @@ describe("a bash-mode command", () => {
   });
 });
 
+describe("reference links in an answer being written", () => {
+  const defined = "[docs]: https://docs.example\n[api]: https://api.example\n\n";
+  /** a link whose words are `words` (a reference's), not a definition's own address */
+  const linked = (words: string) => new RegExp(`<a href="[^"]*"[^>]*><span>${words}</span></a>`);
+
+  it("reads no reference in the part a running turn is writing, and reads it once the turn is done", () => {
+    // `[docs][a` is on its way to `[docs][api]`: while it is written, docs links nowhere yet
+    const writing = render([text(`${defined}See [docs][a`)], { live: true });
+    expect(writing).not.toMatch(linked("docs"));
+    expect(writing).toContain("See [docs][a");
+    expect(render([text(`${defined}See [docs][api]`)], { live: false })).toMatch(/<a href="https:\/\/api\.example"[^>]*><span>docs<\/span><\/a>/);
+  });
+
+  it("reads references in a part written before the one being written", () => {
+    // each part is read on its own, with its own definitions
+    const html = render([text(`${defined}See [docs].`), tool("ls"), text(`${defined}Now [api][a`)], { live: true });
+    expect(html).toMatch(/<a href="https:\/\/docs\.example"[^>]*><span>docs<\/span><\/a>/);
+    expect(html).not.toMatch(linked("api"));
+    expect(html).toContain("Now [api][a");
+  });
+});
+
 describe("an agent turn's work blocks", () => {
   it("says Working… for a running turn that has written no work or words yet", () => {
     for (const parts of [[], [text("\n\n")]]) {
