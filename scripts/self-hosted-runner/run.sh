@@ -563,13 +563,15 @@ psi_under() {
 offer_room() {
   local name slot labels procs youngest="" age value started claim
   OFFER_HOLD=""
-  # a slot that claimed room and has not started its container yet (token, network): an offer on its way
+  # a slot that claimed room and has not started its container yet (token, network): an offer on its way.
+  # Once that container runs, docker ps below counts it. Claims are removed only under the lock ($3), so
+  # a look outside it never deletes a claim a slot has just made again.
   for claim in "$OFFER_STATE/offer-$HOST.claim."*; do
     [ -f "$claim" ] || continue
     name="${claim##*.claim.}"
     [ "$name" = "$1" ] && continue
-    if docker container inspect "$name" >/dev/null 2>&1 || [ -n "$(find "$claim" -mmin +10 2>/dev/null)" ]; then
-      rm -f "$claim"
+    if [ "$(docker container inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" = true ] || [ -n "$(find "$claim" -mmin +10 2>/dev/null)" ]; then
+      if [ "${3:-}" = locked ]; then rm -f "$claim" || true; fi
       continue
     fi
     if [ "$(cat "$claim" 2>/dev/null)" = "$2" ]; then
@@ -586,8 +588,9 @@ offer_room() {
     # has none, so the container counts as idle and an offer of this pool is already on its way. A
     # container whose processes cannot be read is neither: a broken docker top must not stop every
     # offer this host would make.
-    procs="$(docker top "$name" -eo etimes=,args= 2>/dev/null)" || continue
-    age="$(printf '%s\n' "$procs" | awk '$2 ~ /Runner\.Worker/ && $1 ~ /^[0-9]+$/ { print $1; exit }')"
+    # docker top needs the pid column ("Couldn't find PID field in ps output" without it)
+    procs="$(docker top "$name" -eo pid,etimes,args 2>/dev/null)" || continue
+    age="$(printf '%s\n' "$procs" | awk 'NR > 1 && $3 ~ /Runner\.Worker/ && $2 ~ /^[0-9]+$/ { print $2; exit }')"
     if [ -n "$age" ]; then
       if [ -z "$youngest" ] || [ "$age" -lt "$youngest" ]; then youngest="$age"; fi
       continue
@@ -641,7 +644,7 @@ offer_record() {
 # The slot's claim stays until its container shows up (another slot's gate then removes it) or for ten
 # minutes; the slot removes it itself when it gives up this try.
 offer_claim() {
-  printf '%s\n' "$2" > "$OFFER_STATE/offer-$HOST.claim.$1.new" && mv -f "$OFFER_STATE/offer-$HOST.claim.$1.new" "$OFFER_STATE/offer-$HOST.claim.$1" && offer_record
+  printf '%s\n' "$2" > "$OFFER_STATE/.new-claim.$1" && mv -f "$OFFER_STATE/.new-claim.$1" "$OFFER_STATE/offer-$HOST.claim.$1" && offer_record
 }
 
 # Waits for room, then claims it under the host-wide lock and records the start before releasing it.
@@ -654,7 +657,7 @@ offer_wait() {
       # cannot be opened holds the slot instead of ending its loop.
       if ! {
         if flock -w 60 9; then
-          if offer_room "$name" "$labels"; then
+          if offer_room "$name" "$labels" locked; then
             if offer_claim "$name" "$labels"; then claimed=1; else OFFER_HOLD="the gate cannot write its state in $OFFER_STATE"; fi
           fi
         else
@@ -696,7 +699,7 @@ slot_loop() {
     elif ! token="$(gh api -X POST "repos/$REPO/actions/runners/registration-token" --jq .token)"; then problem="could not fetch a registration token"
     fi
     if [ -n "$problem" ]; then
-      rm -f "$OFFER_STATE/offer-$HOST.claim.$name"
+      rm -f "$OFFER_STATE/offer-$HOST.claim.$name" || true
       echo "[$name] $problem; retrying in ${delay}s" >&2
       [ "$ONCE" = 1 ] && return 1
       sleep "$delay"
@@ -731,7 +734,7 @@ slot_loop() {
       echo "[$name] container exited with status $container_status" >&2
     fi
     token=""
-    rm -f "$OFFER_STATE/offer-$HOST.claim.$name"
+    rm -f "$OFFER_STATE/offer-$HOST.claim.$name" || true
     [ "$ONCE" = 1 ] && return "$container_status"
   done
 }

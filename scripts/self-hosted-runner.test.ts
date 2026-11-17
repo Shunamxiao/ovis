@@ -398,12 +398,16 @@ case "$1" in
   # a runner container's processes, as ps prints them in it: a job's Runner.Worker line with the
   # seconds it has run (RUNNER_TEST_PEERS: name, labels, 1 for a job, and how many seconds ago it started)
   top)
-    printf 'UID\tPID\tPPID\tC\tSTIME\tTTY\tTIME\tCMD\n'
-    printf 'runner\t1\t0\t0\t10:00\t?\t00:00:00\ttini -- /entrypoint.sh\n'
+    # as docker does: ps options without a pid column are refused; with -eo pid,etimes,args, a header and
+    # one line per process
+    case " $* " in *" -eo "*pid*) ;; *" -eo "*) echo "Error response from daemon: Couldn't find PID field in ps output" >&2; exit 1 ;; esac
+    printf 'PID                 ELAPSED             COMMAND\n'
+    printf '4170136             600                 tini -- /entrypoint.sh\n'
+    printf '4173958             600                 /home/runner/actions-runner/bin/Runner.Listener run\n'
     [ -n "\${RUNNER_TEST_PEERS:-}" ] && [ -f "$RUNNER_TEST_PEERS" ] || exit 0
     if [ "$(awk -F'\t' -v n="$2" '$1 == n { print $3 }' "$RUNNER_TEST_PEERS")" = 1 ]; then
       age="$(awk -F'\t' -v n="$2" '$1 == n { print ($4 == "" ? 600 : $4) }' "$RUNNER_TEST_PEERS")"
-      printf '%s\t/home/runner/actions-runner/bin/Runner.Worker spawnclient 65 66\n' "$age"
+      printf '4181708             %s                 /home/runner/actions-runner/bin/Runner.Worker spawnclient 151 154\n' "$age"
     fi ;;
   # removing slot 1's own container (the launcher's other docker rm calls name the Bun cache build's)
   rm) case "$last" in *-1) [ -n "\${RUNNER_TEST_SLOT_HELD:-}" ] && rm -f "$RUNNER_TEST_SLOT_HELD" ;; esac; exit 0 ;;
