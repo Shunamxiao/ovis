@@ -6,6 +6,6 @@ import { serveOffThread } from "./offThread.ts";
 import { PREVIEW_ELEMENT_LIMIT, previewElements } from "./textPreview.ts";
 
 serveOffThread<string, MarkdownBlock[] | null>((text) => {
-  const blocks = readReferenceLinks(parseMarkdown(text, 0, true));
+  const blocks = readReferenceLinks(parseMarkdown(text, 0, true), text);
   return { result: previewElements(blocks) > PREVIEW_ELEMENT_LIMIT ? null : blocks };
 });

@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { parseMarkdown, type InlineNode, type MarkdownBlock } from "../../shared/markdown.ts";
 import { readReferenceLinks } from "./markdownReferences.ts";
 
-const preview = (source: string): MarkdownBlock[] => readReferenceLinks(parseMarkdown(source, 0, true));
+const preview = (source: string): MarkdownBlock[] => readReferenceLinks(parseMarkdown(source, 0, true), source);
 const link = (href: string, words: string, title?: string): InlineNode => ({ type: "link", href, ...(title ? { title } : {}), children: [{ type: "text", value: words }] });
 
 function lines(blocks: MarkdownBlock[]): InlineNode[][] {
@@ -52,10 +52,14 @@ describe("reference links in a Preview", () => {
     ]] }]);
   });
 
-  it("reads references side by side, and the definition a hidden comment held is not one", () => {
+  it("reads references side by side", () => {
     expect(preview("See [Mozilla CoC].\n\n[mozilla  coc]: https://m.dev")).toEqual([{ type: "paragraph", lines: [[{ type: "text", value: "See " }, link("https://m.dev", "Mozilla CoC"), { type: "text", value: "." }]] }]);
     expect(preview("[a][x][b][y]\n\n[x]: https://x.dev\n[y]: https://y.dev")).toEqual([{ type: "paragraph", lines: [[link("https://x.dev", "a"), link("https://y.dev", "b")]] }]);
-    expect(preview("<!--\n\n[docs]: https://wrong.example\n\n-->\n\n[docs]: https://right.example\n\n[docs]")).toEqual([{ type: "paragraph", lines: [[link("https://right.example", "docs")]] }]);
+    expect(preview("<!-- the links -->\n\nSee [r].\n\n[r]: https://r.dev")).toEqual([{ type: "paragraph", lines: [[{ type: "text", value: "See " }, link("https://r.dev", "r"), { type: "text", value: "." }]] }]);
+    expect(preview("[**a**][r]xx![**b**][r]\n\n[r]: https://r.dev")).toEqual([{ type: "paragraph", lines: [[
+      { type: "link", href: "https://r.dev", children: [{ type: "strong", children: [{ type: "text", value: "a" }] }] },
+      { type: "text", value: "xx![" }, { type: "strong", children: [{ type: "text", value: "b" }] }, { type: "text", value: "][r]" },
+    ]] }]);
   });
 
   it("keeps a definition nothing used, and the text after the definitions a paragraph starts with", () => {
@@ -82,6 +86,17 @@ describe("reference links in a Preview", () => {
     ["definition-shaped text in a code span or a code block", "[r]: https://good.example\n\n`[r]`: https://evil.example\n\n```\n[s]: https://evil.example\n```\n\n[s]: https://good.example\n\n[r] [s]"],
     ["a second definition that only looks the same (a zero-width character, an accent written apart, a Cyrillic letter)", "See [docs] and [café].\n\n[docs]: https://evil.example\n[café]: https://evil.example\n\n[do\u200bcs]: https://a.example\n[cafe\u0301]: https://b.example\n\n[d\u043ecs]: https://c.example"],
     ["definition-shaped text before a look-alike colon or space", "See [a] [b] [c] [d].\n\n[a]: https://evil.example\n[b]: https://evil.example\n[c]: https://evil.example\n[d]: https://evil.example\n\n[a]\u00a0: https://a.example\n\n[b]\u200b: https://b.example\n\n[c]\u2236 https://c.example\n\n\uff3bd\uff3d\uff1a https://d.example"],
+    ["a definition whose link text drops the address's scheme", "See [r].\n\n[r]: [https://shown.example](https://https://shown.example)"],
+    ["definition-shaped text before a combining mark or a dash, then an address", "[r] [s]\n\n[r]: https://ref.example\n[s]: https://ref.example\n\nextra [r]\u0323: https://two.example\n\nextra [s] \u2014 https://two.example"],
+    ["a comment holding a label, even one the HTML reader drew nothing of, or one never closed", "<!--\n\n[docs]: https://wrong.example\n\n-->\n\n[docs]: https://right.example\n\n[docs]\n\n<div>\n<!--\n\n[s]: https://evil.example\n\n-->\n</div>\n\nSee [s]."],
+    ["a comment never closed", "See [t].\n\n[t]: https://good.example\n\n<!--\n\n[t]: https://evil.example"],
+    ["a label reordered by a bidi control", "See [\u202escod\u202c].\n\n[docs]: https://good.example\n\n[\u202escod\u202c]: https://evil.example"],
+    ["definition-shaped text before any other separator or between other brackets", "[a]\u2982 https://evil.example\n\n[b]\u1361 https://evil.example\n\n[c]\ufe30 https://evil.example\n\n[d]\u2800: https://evil.example\n\n\u2045e\u2046: https://evil.example\n\n[a] [b] [c] [d] [e]\n\n[a]: https://good.example\n[b]: https://good.example\n[c]: https://good.example\n[d]: https://good.example\n[e]: https://good.example"],
+    ["definition-shaped text in a picture's words, a link's words or a formula", '<p><a href="https://x.dev">[a]: https://evil.example<img src="p.png"></a></p>\n\n<img src="missing.png" alt="[b]: https://evil.example">\n\n$\\text{[}\\text{c}\\text{]: https://evil.example}$\n\n[a] [b] [c]\n\n[a]: https://good.example\n[b]: https://good.example\n[c]: https://good.example'],
+    ["a bidi control written as an HTML character reference", "<p>[&#x202e;scod&#x202c;]: https://evil.example</p>\n\n[docs]: https://good.example\n\nSee [docs]."],
+    ["definition-shaped text a formula draws with commands", "$\\lbrack a\\rbrack\\colon https://evil.example$\n\n[a]: https://good.example\n\nSee [a]."],
+    ["a look-alike made of two letters", "See [modern].\n\n[modern]: https://good.example\n\n[rnodern]: https://evil.example"],
+    ["a reference with no visible words", "Done [\u200b][r] and [ ][r].\n\n[r]: https://r.dev"],
     ["a blank label", "Tick [ ] when done.\n\n[ ]: https://x.example"],
     ["a comment shown as code", "`<!--`\n\n[docs]: https://d.dev\n\n[docs]"],
     ["a reference whose text holds a link or a bracket", "[see https://x.dev][r] [**a]**][r]\n\n[r]: https://r.dev"],
@@ -98,7 +113,7 @@ describe("reference links in a Preview", () => {
     let state = 7;
     const random = (count: number): number => { state = (state * 1103515245 + 12345) % 2 ** 31; return (state >>> 12) % count; };
     let read = 0;
-    for (let document = 0; document < 4000; document += 1) {
+    for (let document = 0; document < 6000; document += 1) {
       let url = 0;
       const pieces = (): string => {
         const label = labels[random(labels.length)]!;
@@ -122,7 +137,7 @@ describe("reference links in a Preview", () => {
       }
       const source = sourceLines.join("\n");
       const main = parseMarkdown(source, 0, true);
-      const out = readReferenceLinks(main);
+      const out = readReferenceLinks(main, source);
       const mainLines = lines(main);
       const outLines = lines(out);
       const address = (drawn: Extract<InlineNode, { type: "link" }>): boolean => words(drawn.children) === drawn.href;
@@ -156,6 +171,6 @@ describe("reference links in a Preview", () => {
       expect(at).toBeLessThanOrEqual(kept.length);
       for (const char of kept.slice(at)) expect(labels.join("")).toContain(char);
     }
-    expect(read).toBeGreaterThan(100);
+    expect(read).toBeGreaterThan(130);
   });
 });
