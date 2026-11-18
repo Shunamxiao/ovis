@@ -66,7 +66,9 @@ function normalLabel(label: string): string {
  * an address and a title (read only as written).
  */
 function definition(line: InlineNode[]): { label: string; link: LinkNode | null } | null {
-  const shaped = SHAPED.exec(words(line));
+  // shaped as written: a line whose `[label]:` is in emphasis or code is no definition
+  const [first] = line;
+  const shaped = first?.type === "text" ? SHAPED.exec(first.value) : null;
   const label = shaped === null ? "" : normalLabel(shaped[1]!);
   if (label === "") return null;
   const match = line.every((node) => node.type === "text" || autolink(node)) ? DEFINITION.exec(shownText(line) ?? "") : null;
@@ -74,15 +76,6 @@ function definition(line: InlineNode[]): { label: string; link: LinkNode | null 
   return { label, link: more.length === 0 && made?.type === "link" ? made : null };
 }
 
-function words(nodes: InlineNode[]): string {
-  return nodes.map((node) => {
-    switch (node.type) {
-      case "text": case "code": case "math": return node.value;
-      case "strong": case "em": case "del": case "link": case "file": return words(node.children);
-      case "image": return node.alt;
-    }
-  }).join("");
-}
 
 /** A link whose words are its own address (`https://x.dev`, `www.x.dev`), as the inline reader draws one. */
 function autolink(node: InlineNode): boolean {
@@ -156,8 +149,9 @@ function resolveLine(line: InlineNode[], definitions: ReadonlyMap<string, LinkNo
         for (const match of value.matchAll(REFERENCE)) {
           const start = at + match.index;
           const end = start + match[0].length;
-          const target = definitions.get(normalLabel(match[2] || match[1]!));
-          if (target === undefined || match[1]!.trim() === "" || !opens(start) || !closes(end, match[2] === undefined)) continue;
+          const label = match[2] || match[1]!;
+          const target = definitions.get(normalLabel(label));
+          if (target === undefined || match[1]!.trim() === "" || [...label].length > 999 || !opens(start) || !closes(end, match[2] === undefined)) continue;
           push({ type: "text", value: value.slice(offset, match.index) });
           push(linkTo(target, [{ type: "text", value: match[1]! }]));
           changed = true;
