@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { parsePatchFiles } from "@pierre/diffs";
@@ -575,6 +575,29 @@ describe("bounds", () => {
     writeFileSync(secret, "do not read\n");
     symlinkSync(secret, join(root, "link.txt"));
     expect(await repoDiffFile(root, query({ path: "link.txt" }))).toMatchObject({ patch: null, unavailable: "unsupported", truncated: false });
+  });
+
+  it("does not follow a folder swapped for a link out of the repository after the listing or during git's read", async () => {
+    const swapped = repository("swapped-folder");
+    git(swapped, "commit", "-q", "--allow-empty", "-m", "first");
+    const outside = join(scratch, "outside-folder");
+    mkdirSync(outside);
+    writeFileSync(join(outside, "a.txt"), "do not read\n");
+    for (const [label, when] of [["listing", "*ls-files*"], ["read", "*--no-index*"]] as const) {
+      const folder = join(swapped, "d");
+      rmSync(folder, { recursive: true, force: true });
+      rmSync(join(swapped, "d-was"), { recursive: true, force: true });
+      mkdirSync(folder);
+      writeFileSync(join(folder, "a.txt"), "inside\n");
+      const swap = `mv '${folder}' '${join(swapped, "d-was")}' && ln -s '${outside}' '${folder}'`;
+      const racer = join(scratch, `swapping-git-${label}`);
+      const run = label === "listing" ? `git "$@"; code=$?; ${swap}; exit $code` : `${swap}; exec git "$@"`;
+      writeFileSync(racer, `#!/bin/sh\ncase "$*" in ${when}) ${run} ;; esac\nexec git "$@"\n`);
+      chmodSync(racer, 0o755);
+      const answer = await repoDiffFile(swapped, query({ path: "d/a.txt" }), { git: racer });
+      expect(lstatSync(folder).isSymbolicLink()).toBeTrue();
+      expect(answer).toMatchObject({ patch: null, unavailable: "unsupported" });
+    }
   });
 
   it("stops a git that does not answer by its deadline, and says when there is no git", async () => {

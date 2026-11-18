@@ -20,8 +20,8 @@
  * terminal the same browser can already type `git diff` into.
  */
 
-import { closeSync, lstatSync, openSync, readSync } from "node:fs";
-import { join } from "node:path";
+import { closeSync, lstatSync, openSync, readSync, realpathSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 import type { RepoBranchComparison, RepoDiffFile, RepoDiffFileList, RepoDiffFilePatch, RepoDiffRefs, RepoDiffRepository, RepoDiffScope, RepoDiffStatus } from "../shared/protocol.ts";
 import { errorResponse, jsonResponse } from "./http.ts";
@@ -350,9 +350,19 @@ export async function repoDiffFiles(cwd: string, params: URLSearchParams, option
 }
 
 /**
- * What an untracked path is on disk. Only its last component is checked for a link (lstat, before
- * the open): a directory above it that is a link is followed, out of the repository too.
+ * Whether every folder between the repository's root and `path` is a folder, not a link. git lists no
+ * path below a linked folder, but a folder can be swapped for one after the listing.
  */
+function foldersUnlinked(root: string, path: string): boolean {
+  const folder = dirname(path);
+  try {
+    return realpathSync(join(root, folder)) === join(realpathSync(root), folder);
+  } catch {
+    return false;
+  }
+}
+
+/** What an untracked path is on disk: its last component is checked for a link here, its folders by `foldersUnlinked`. */
 function untrackedKind(path: string, maxBytes: number): "text" | "binary" | "too_large" | "unsupported" {
   let fd: number | null = null;
   try {
@@ -401,11 +411,13 @@ export async function repoDiffFile(cwd: string, params: URLSearchParams, options
 
     let run: GitRun;
     if (file.status === "untracked") {
-      const kind = untrackedKind(join(repository.root, path), context.maxPatchBytes);
+      const kind = foldersUnlinked(repository.root, path) ? untrackedKind(join(repository.root, path), context.maxPatchBytes) : "unsupported";
       if (kind === "binary") return answer(null, "binary", { ...file, binary: true });
       if (kind !== "text") return answer(null, kind, file);
       run = await runGit(context, repository.root, ["diff", "--no-index", ...DIFF_FLAGS, `-U${REPO_DIFF_CONTEXT_LINES}`, "--", "/dev/null", path], context.maxPatchBytes);
       if (!run.overflow && run.code !== 1 && run.code !== 0) throw new RepoDiffError("git_failed", "git could not read that file", 500);
+      // checked again after git's read: git follows a folder that was swapped for a link while it read
+      if (!foldersUnlinked(repository.root, path)) return answer(null, "unsupported", file);
     } else {
       run = await runGit(context, repository.root, ["diff", ...DIFF_FLAGS, `-U${REPO_DIFF_CONTEXT_LINES}`, ...comparison.args, "--", ...pathspec], context.maxPatchBytes);
       if (!run.overflow && run.code !== 0) throw new RepoDiffError("git_failed", "git could not compare that file", 500);
