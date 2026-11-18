@@ -6,14 +6,14 @@
  */
 import "./test-herdr.ts";
 import assert from "node:assert/strict";
+import { EventEmitter, once } from "node:events";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadavg, tmpdir } from "node:os";
-import { chromium, type BrowserContext, type CDPSession, type Page, type WebSocket as BrowserSocket } from "playwright-core";
+import { chromium, type BrowserContext, type CDPSession, type Page } from "playwright-core";
 import { createServer } from "../server/index.ts";
 import { UsageService } from "../server/usage.ts";
 import { herdrRpc, paneRead, paneScrollInfo, workspaceClose, workspaceCreate } from "../server/herdr/client.ts";
-import type { ClientMessage, ServerMessage } from "../shared/protocol.ts";
 import { chromePath } from "./chrome-path.ts";
 import { shownRow, shownRows } from "./shown-rows.ts";
 import { finalStep, HERDR_MOUSE_SCROLL_LINES, wheelSteps } from "../src/lib/wheelSteps.ts";
@@ -179,28 +179,40 @@ async function instrument(context: BrowserContext): Promise<void> {
 
 const wheelsSent = (events: ProbeEvent[]) => events.filter((event) => event.k === "send").reduce((sum, event) => sum + (event.wheels ?? 0), 0);
 
-export async function runTouchBurst(part: "application" | "history"): Promise<void> { try {
+export async function runTouchBurst(part: "application" | "history"): Promise<void> {
+  const receipts = new EventEmitter();
+  let receivedReports = 0;
+  // The attach stream sends screen diffs, where unchanged marker characters can be omitted.
+  // Use a private byte stream with one byte per complete wheel report, independent of rendering.
+  const receiptListener = part === "history" ? Bun.listen({
+    hostname: "127.0.0.1", port: 0,
+    socket: {
+      data(_socket, chunk) {
+        for (let i = 0; i < chunk.length; i++) receipts.emit(String(++receivedReports));
+      },
+    },
+  }) : undefined;
+try {
   const program = join(state, "wheel-app.mjs");
   const log = join(state, "input.bin");
   writeFileSync(program, `
 import { appendFileSync, writeFileSync } from "node:fs";
+import { createConnection } from "node:net";
+const receiptPort = ${receiptListener?.port ?? 0};
+const receipts = receiptPort === 0 ? null : createConnection({ host: "127.0.0.1", port: receiptPort });
 writeFileSync(${JSON.stringify(log)}, "");
 process.stdin.setRawMode(true);
 let marks = 0;
-let wheelCount = 0;
 let tail = "";
 process.stdin.on("data", data => {
   appendFileSync(${JSON.stringify(log)}, data);
-  if (${part === "history"}) {
+  if (receipts) {
     const input = tail + data.toString("latin1");
     const reports = [...input.matchAll(${WHEEL_REPORT})];
     const lastEscape = input.lastIndexOf("\\x1b");
     // Keep an unfinished report when the PTY splits it across stdin reads.
     tail = lastEscape > (reports.at(-1)?.index ?? -1) ? input.slice(lastEscape) : "";
-    if (reports.length > 0) {
-      wheelCount += reports.length;
-      process.stdout.write("WHEELS_" + wheelCount + "_DONE\\r\\n");
-    }
+    if (reports.length > 0) receipts.write(".".repeat(reports.length));
   }
   for (const byte of data) if (byte === 0x6b) { marks += 1; process.stdout.write("MARK_" + marks + "_DONE\\r\\n"); }
 });
@@ -231,14 +243,7 @@ process.stdout.write(Array.from({ length: 400 }, (_, n) => "app history " + n + 
   const takeovers: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("request", (request) => { if (/takeover/i.test(request.url()) || /takeover/i.test(request.postData() ?? "")) takeovers.push(request.url()); });
-  let appSocket: BrowserSocket | undefined;
-  page.on("websocket", (socket) => socket.on("framesent", ({ payload }) => {
-    const text = String(payload);
-    if (/takeover/i.test(text)) takeovers.push(text);
-    if (new URL(socket.url()).pathname !== "/ws") return;
-    const message: ClientMessage = JSON.parse(text);
-    if (message.type === "attach" && message.pane_id === appPane) appSocket = socket;
-  }));
+  page.on("websocket", (socket) => socket.on("framesent", ({ payload }) => { if (/takeover/i.test(String(payload))) takeovers.push(String(payload)); }));
   const cdp: CDPSession = await context.newCDPSession(page);
   const touch = (type: "touchStart" | "touchMove" | "touchEnd", x = 0, y = 0) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints: type === "touchEnd" ? [] : [{ x, y }] });
   const liftStill = async () => {
@@ -250,7 +255,6 @@ process.stdout.write(Array.from({ length: 400 }, (_, n) => "app history " + n + 
   };
 
   const open = async (pane: string) => {
-    appSocket = undefined;
     const metrics = page.waitForResponse((response) => response.url().includes("/api/pane/scroll?") && response.request().method() === "GET");
     await page.goto(`${origin}/?pane=${encodeURIComponent(pane)}`);
     await metrics;
@@ -526,23 +530,11 @@ process.stdout.write(Array.from({ length: 400 }, (_, n) => "app history " + n + 
     const logAtStart = readFileSync(log, "latin1");
     const logBefore = logAtStart.length;
     const start = await page.evaluate(() => { window.__burst.events.length = 0; window.__frames.hold = true; return performance.now(); });
-    let receipt: Promise<unknown> | undefined;
-    if (boundary === "disconnect") {
-      assert.ok(appSocket, "disconnect: the application has an attached socket");
-      const marker = `WHEELS_${reported(logAtStart).length + TOUCH_WHEEL_REPORTS_PER_FRAME}_DONE`;
-      let tail = "";
-      // Subscribe before the swipe and keep later frames held until the app has read the batch.
-      receipt = appSocket.waitForEvent("framereceived", {
-        timeout: 15_000,
-        predicate: ({ payload }) => {
-          const message: ServerMessage = JSON.parse(String(payload));
-          if (message.type !== "pty-data" || message.pane_id !== appPane || message.replay) return false;
-          const output = tail + message.data;
-          tail = output.slice(1 - marker.length);
-          return output.includes(marker);
-        },
-      });
-    }
+    // Subscribe before the swipe and keep later frames held until the app has read the batch.
+    const receipt = boundary === "disconnect"
+      ? once(receipts, String(reported(logAtStart).length + TOUCH_WHEEL_REPORTS_PER_FRAME), { signal: AbortSignal.timeout(15_000) })
+        .catch((cause: unknown) => { throw new Error("disconnect: application did not acknowledge the first frame's wheel reports", { cause }); })
+      : undefined;
     await Promise.all([receipt, (async () => {
       await touch("touchStart", x, top);
       await touch("touchMove", x, top + stepPixels * 10.75);
@@ -730,6 +722,7 @@ process.stdout.write(Array.from({ length: 400 }, (_, n) => "app history " + n + 
   if (part === "application") { console.log("PASS attached touch scrolling in an application: every step arrives, paced and bounded, and a quick swipe glides until a touch stops it"); return; }
   console.log("PASS attached touch scrolling: every step arrives, paced and bounded, and every boundary cancels the rest");
 } finally {
+  receiptListener?.stop(true);
   await browser?.close();
   server?.stop();
   for (const workspace of workspaces) await workspaceClose(workspace).catch(() => {});
