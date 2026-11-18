@@ -4,8 +4,7 @@ import type { InteractivePrompt } from "../../shared/protocol.ts";
 import { setCurrentLanguage, translate } from "./i18n.ts";
 import { CASE_FOLDING_DATA } from "./caseFolding.generated.ts";
 import { CONFUSABLES_DATA } from "./confusables.generated.ts";
-import { skeleton } from "./lookalike.ts";
-import { answerFromText, answerHint, answerRefusal, blocksStepNavigation, focusFollowsAnswer, needsConfirmation, pressOrigin, sendsChecksWithText, type PressOrigin, type TypedAnswer } from "./promptAnswer.ts";
+import { answerFromText, answerHint, answerRefusal, blocksStepNavigation, focusFollowsAnswer, needsConfirmation, pressOrigin, sendsChecksWithText, skeleton, type PressOrigin, type TypedAnswer } from "./promptAnswer.ts";
 
 const prompt = (options: string[], custom: number | null, multi = false): InteractivePrompt => ({
   id: "p", agent: "claude", kind: "question", title: "Question", question: "?", body: null,

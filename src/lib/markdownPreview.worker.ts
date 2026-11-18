@@ -2,12 +2,10 @@
 // input the parser handles slowly stalls this worker, which is ended past its budget, never the tab.
 import { parseMarkdown, type MarkdownBlock } from "../../shared/markdown.ts";
 import { readReferenceLinks } from "./markdownReferences.ts";
-import type { PreviewText } from "./markdownPreview.ts";
 import { serveOffThread } from "./offThread.ts";
 import { PREVIEW_ELEMENT_LIMIT, previewElements } from "./textPreview.ts";
 
-serveOffThread<PreviewText, MarkdownBlock[] | null>(({ text, whole }) => {
-  const parsed = parseMarkdown(text, 0, true);
-  const blocks = whole ? readReferenceLinks(parsed, text) : parsed;
+serveOffThread<string, MarkdownBlock[] | null>((text) => {
+  const blocks = readReferenceLinks(parseMarkdown(text, 0, true));
   return { result: previewElements(blocks) > PREVIEW_ELEMENT_LIMIT ? null : blocks };
 });

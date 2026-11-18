@@ -51,23 +51,23 @@ const NO_PREVIEW: Preview = { status: "none" };
 const PENDING_PREVIEW: Preview = { status: "pending" };
 const FAILED_PREVIEW: Preview = { status: "failed" };
 
-function useMarkdownPreview(text: string | null, whole: boolean): Preview {
+function useMarkdownPreview(text: string | null): Preview {
   const known = useMemo((): Preview | null => {
     if (text === null) return NO_PREVIEW;
-    const blocks = knownPreview(text, whole);
+    const blocks = knownPreview(text);
     if (blocks === undefined) return null;
     return blocks === null ? FAILED_PREVIEW : { status: "ready", blocks };
-  }, [text, whole]);
-  const [answer, setAnswer] = useState<{ text: string; whole: boolean; blocks: MarkdownBlock[] | null } | null>(null);
+  }, [text]);
+  const [answer, setAnswer] = useState<{ text: string; blocks: MarkdownBlock[] | null } | null>(null);
   useEffect(() => {
     if (known !== null || text === null) return;
     let live = true;
-    const job = parsePreviewOffThread(text, whole);
-    void job.promise.then((blocks) => { if (live) setAnswer({ text, whole, blocks }); });
+    const job = parsePreviewOffThread(text);
+    void job.promise.then((blocks) => { if (live) setAnswer({ text, blocks }); });
     return () => { live = false; job.cancel(); };
-  }, [known, text, whole]);
+  }, [known, text]);
   if (known !== null) return known;
-  if (answer === null || answer.text !== text || answer.whole !== whole) return PENDING_PREVIEW;
+  if (answer === null || answer.text !== text) return PENDING_PREVIEW;
   return answer.blocks === null ? FAILED_PREVIEW : { status: "ready", blocks: answer.blocks };
 }
 
@@ -332,7 +332,7 @@ export function FileViewer({ path: asked, paneId, onClose, onOpen, keyboardActiv
   </div>;
   const textFile = info?.kind === "text";
   const language = languageForPath(info?.path ?? target.path);
-  const preview = useMarkdownPreview(textFile && loaded !== null && mode === "preview" && hasPreview(language) ? loaded.text : null, loaded?.truncated === false);
+  const preview = useMarkdownPreview(textFile && loaded !== null && mode === "preview" && hasPreview(language) ? loaded.text : null);
   const previewRefused = preview.status === "failed";
   const previewable = hasPreview(language) && !previewRefused;
   const view = previewable && mode === "preview" ? "markdown" : "code";
