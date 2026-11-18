@@ -12,22 +12,22 @@ import { parseInline, shownText, type InlineNode, type MarkdownBlock } from "../
  *
  * - A definition is a line a top-level paragraph starts with, drawn as `[label]: address` with an
  *   optional quoted title, whose address the inline reader links as a web address.
- * - A label defined twice (in case and spacing) defines nothing.
+ * - A label defined twice (in case and spacing), with or without a web address, defines nothing.
  * - Read as written, as before: a footnote (`[^1]`), a reference after `!`, `\\`, `[` or a stray `]`
  *   (an image reference, a linked badge), a shortcut before `(`, `[` or `]`, and one followed by a
  *   colon (text shaped as a definition, which links nothing).
  */
 export function readReferenceLinks(blocks: MarkdownBlock[]): MarkdownBlock[] {
-  const read = new Map<string, Array<Extract<InlineNode, { type: "link" }>>>();
+  const read = new Map<string, Array<LinkNode | null>>();
   for (const block of blocks) {
     if (block.type !== "paragraph") continue;
     for (const line of block.lines) {
       const found = definition(line);
       if (found === null) break;
-      if (found.link !== null) read.set(found.label, [...(read.get(found.label) ?? []), found.link]);
+      read.set(found.label, [...(read.get(found.label) ?? []), found.link]);
     }
   }
-  const definitions = new Map([...read].flatMap(([label, links]) => links.length === 1 ? [[label, links[0]!] as const] : []));
+  const definitions = new Map([...read].flatMap(([label, [link, ...more]]) => link !== null && link !== undefined && more.length === 0 ? [[label, link] as const] : []));
   if (definitions.size === 0) return blocks;
 
   const resolved = new Map<InlineNode[], InlineNode[]>();
@@ -40,24 +40,36 @@ export function readReferenceLinks(blocks: MarkdownBlock[]): MarkdownBlock[] {
 
 type LinkNode = Extract<InlineNode, { type: "link" }>;
 
-const LABEL = String.raw`\[(?!\^)([^[\]\n]*[^[\]\s][^[\]\n]*)\]`;
+// at most 999 characters, as CommonMark: a longer run is no label, and the search stays linear on a line
+// with a `[` that never closes
+const LABEL = String.raw`\[(?!\^)([^[\]\n]{1,999})\]`;
 const REFERENCE = new RegExp(String.raw`${LABEL}(?:\[([^[\]\n]*)\])?`, "g");
 const COLON = /[ \t]*:/y;
 const CLOSES_ACROSS = new RegExp(String.raw`^\]${LABEL.slice(0, -2)}\]`);
-const DEFINITION = new RegExp(String.raw`^ {0,3}${LABEL}:[ \t]+<?([^\s<>]+)>?((?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?)[ \t]*$`);
+const DEFINITION = new RegExp(String.raw`^ {0,3}${LABEL}:[ \t]+(?:<([^\s<>]+)>|([^\s<>]+))((?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?)[ \t]*$`);
 
 function normalLabel(label: string): string {
   return label.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
-/** A definition line's label, and the link the inline reader makes of its address (null: no web address). */
+/**
+ * A definition line's label, and the link the inline reader makes of its address (null: no web
+ * address). Only a line of plain text and autolinks is read, so its address and title are as written.
+ */
 function definition(line: InlineNode[]): { label: string; link: LinkNode | null } | null {
-  const text = shownText(line);
-  const match = text === null ? null : DEFINITION.exec(text);
-  if (match === null) return null;
-  const [made, ...more] = parseInline(`[x](${match[2]}${match[3]})`);
-  const link = more.length === 0 && made?.type === "link" ? made : null;
-  return { label: normalLabel(match[1]!), link };
+  if (!line.every((node) => node.type === "text" || autolink(node))) return null;
+  const match = DEFINITION.exec(shownText(line) ?? "");
+  const label = match === null ? "" : normalLabel(match[1]!);
+  if (match === null || label === "") return null;
+  const [made, ...more] = parseInline(`[x](${match[2] ?? match[3]}${match[4]})`);
+  return { label, link: more.length === 0 && made?.type === "link" ? made : null };
+}
+
+/** A link whose words are its own address (`https://x.dev`, `www.x.dev`), as the inline reader draws one. */
+function autolink(node: InlineNode): boolean {
+  if (node.type !== "link" || node.title !== undefined) return false;
+  const [words, ...more] = node.children;
+  return more.length === 0 && words?.type === "text" && (node.href === words.value || node.href === `https://${words.value}`);
 }
 
 function linkTo(target: LinkNode, children: InlineNode[]): InlineNode {
@@ -126,7 +138,7 @@ function resolveLine(line: InlineNode[], definitions: ReadonlyMap<string, LinkNo
           const start = at + match.index;
           const end = start + match[0].length;
           const target = definitions.get(normalLabel(match[2] || match[1]!));
-          if (target === undefined || !opens(start) || !closes(end, match[2] === undefined)) continue;
+          if (target === undefined || match[1]!.trim() === "" || !opens(start) || !closes(end, match[2] === undefined)) continue;
           push({ type: "text", value: value.slice(offset, match.index) });
           push(linkTo(target, [{ type: "text", value: match[1]! }]));
           changed = true;

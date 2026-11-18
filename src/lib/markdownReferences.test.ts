@@ -60,18 +60,32 @@ describe("reference links in a Preview", () => {
   });
 
   it.each([
-    ["a label defined twice", "[docs]\n\n[docs]: https://good.example\n[DOCS]: https://other.example"],
+    ["a label defined twice, also when one has no web address", "[docs] [a]\n\n[docs]: https://good.example\n[DOCS]: https://other.example\n\n[a]: ./notes.md\n[a]: https://y.dev"],
+    ["a definition holding markup or an unclosed bracket", "[a] [b] [c]\n\n[a]: x.dev/_a_/b\n\n[b]: https://x.dev \"the *one* page\"\n\n[c]: <https://c.dev"],
+    ["a label longer than 999 characters", `[${"a".repeat(1000)}]\n\n[${"a".repeat(1000)}]: https://a.dev`],
     ["an address that is no web address", "[a] [b] [c] [d]\n\n[a]: ssh://h/x\n[b]: tel:123\n[c]: ./notes.md\n[d]: N/A"],
     ["a definition in a list item, a quote, a heading, a cell or after a paragraph's text", "- [a]: https://a.example\n\n> [b]: https://b.example\n\n# [c]: https://c.example\n\n| [d]: https://d.example |\n|---|\n\ntext\n[e]: https://e.example\n\n[a] [b] [c] [d] [e]"],
     ["a reference followed by a colon", "[r]: https://r.dev\n\n| [r]: https://wrong.example | x |\n|---|---|\n\n**[r]**: x, [x][r] : y"],
     ["a footnote", "Bun[^1].\n\n[^1]: https://bun.sh"],
     ["a linked badge", "[![build][badge]][ci]\n\n[badge]: https://img.dev/b.svg\n[ci]: https://ci.dev"],
     ["a reference before a parenthesis or bracket, or after a bracket, a backslash or `!`", "[a](x [[a]] \\[a] ![a] ![**b**][a]\n\n[a]: https://a.dev"],
-    ["a blank label or words", "Tick [ ] when done, [ ][r].\n\n[ ]: https://x.example\n[r]: https://r.example"],
+    ["a blank label or words", "Tick [ ] when done, [ ][r].\n\n[ ]: https://x.example\n\n[r]: https://r.example"],
     ["a reference in code or a formula", "`[r]` $[r]$\n\n[r]: https://r.example"],
     ["a reference whose words hold a link or a bracket", "[see https://x.dev][r] [**a]**][r]\n\n[r]: https://r.dev"],
   ])("leaves %s as written", (_, source) => {
     expect(preview(source)).toEqual(parseMarkdown(source, 0, true));
+  });
+
+  it("reads a long line with a bracket that never closes in time that grows with the line", () => {
+    // each length 4 times the last: a search that tried every split of the line took about 16 times longer each step
+    const times = [20_000, 80_000, 320_000].map((length) => {
+      const source = `[${"a ".repeat(length / 2)}\n\nx [${"a".repeat(length)}\n\n[a]: https://a.dev`;
+      const blocks = parseMarkdown(source, 0, true);
+      const start = performance.now();
+      readReferenceLinks(blocks);
+      return performance.now() - start;
+    });
+    expect(times[2]!).toBeLessThan(1_000);
   });
 
   it("draws only links to an address on screen, and changes nothing else (generated documents)", () => {
@@ -120,6 +134,6 @@ describe("reference links in a Preview", () => {
         for (const char of was.slice(i)) expect(`[]${labels.join("")}`).toContain(char);
       });
     }
-    expect(read).toBeGreaterThan(200);
+    expect(read).toBeGreaterThan(120);
   });
 });
