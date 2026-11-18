@@ -42,6 +42,11 @@ describe("reference links in a Preview", () => {
     expect(lines(blocks).flatMap(links).map((drawn) => drawn.href)).toEqual(["https://a.dev", "https://a.dev", "https://a.dev", "https://a.dev", "https://www.b.dev", "https://a.dev", "https://www.b.dev"]);
   });
 
+  it("caps a label, not a reference's words, at 999 characters", () => {
+    expect(lines(preview(`[${"w".repeat(1000)}][r] [${"a".repeat(998)}😀]\n\n[r]: https://r.dev\n\n[${"a".repeat(998)}😀]: https://e.dev`)).flatMap(links).map((drawn) => drawn.href))
+      .toEqual(["https://r.dev", "https://e.dev", "https://r.dev", "https://e.dev"]);
+  });
+
   it("reads a reference whose words hold emphasis or code, and references side by side", () => {
     expect(preview("[**bold** words][r] and [`api()`][r].\n\n[r]: https://r.dev")[0]).toEqual({ type: "paragraph", lines: [[
       { type: "link", href: "https://r.dev", children: [{ type: "strong", children: [{ type: "text", value: "bold" }] }, { type: "text", value: " words" }] },
@@ -62,7 +67,9 @@ describe("reference links in a Preview", () => {
   it.each([
     ["a label defined twice, also when one has no web address", "[docs] [a]\n\n[docs]: https://good.example\n[DOCS]: https://other.example\n\n[a]: ./notes.md\n[a]: https://y.dev"],
     ["a definition holding markup or an unclosed bracket", "[a] [b] [c]\n\n[a]: x.dev/_a_/b\n\n[b]: https://x.dev \"the *one* page\"\n\n[c]: <https://c.dev"],
-    ["a label longer than 999 characters", `[${"a".repeat(1000)}]\n\n[${"a".repeat(1000)}]: https://a.dev`],
+    ["a definition holding a reference, or defined again by a line not read", "[go][r] [a] [b] [c]\n\n[r]: localhost/[path][s]\n[s]: https://s.example\n\n[a]: https://x.dev \"the *one* page\"\n\n[a]: https://y.dev\n\n[b]: https://x.dev>\n\n[b]: https://y.dev\n\n[c]: file:///etc/passwd\n\n[c]: https://y.dev"],
+    ["a footnote through formatting, a blank label in a reference, or a shortcut before a bracket", "[^**note**][r] [x][ ] [**b**][ ] [a][ [a]]\n\n[r]: https://r.example\n\n[ ]: https://x.dev\n\n[a]: https://a.dev"],
+    ["a label longer than 999 characters", `[${"a".repeat(1000)}] [x][${" ".repeat(999)}a]\n\n[${"a".repeat(1000)}]: https://a.dev\n\n[a]: https://a.dev`],
     ["an address that is no web address", "[a] [b] [c] [d]\n\n[a]: ssh://h/x\n[b]: tel:123\n[c]: ./notes.md\n[d]: N/A"],
     ["a definition in a list item, a quote, a heading, a cell or after a paragraph's text", "- [a]: https://a.example\n\n> [b]: https://b.example\n\n# [c]: https://c.example\n\n| [d]: https://d.example |\n|---|\n\ntext\n[e]: https://e.example\n\n[a] [b] [c] [d] [e]"],
     ["a reference followed by a colon", "[r]: https://r.dev\n\n| [r]: https://wrong.example | x |\n|---|---|\n\n**[r]**: x, [x][r] : y"],
@@ -76,16 +83,15 @@ describe("reference links in a Preview", () => {
     expect(preview(source)).toEqual(parseMarkdown(source, 0, true));
   });
 
-  it("reads a long line with a bracket that never closes in time that grows with the line", () => {
-    // each length 4 times the last: a search that tried every split of the line took about 16 times longer each step
-    const times = [20_000, 80_000, 320_000].map((length) => {
-      const source = `[${"a ".repeat(length / 2)}\n\nx [${"a".repeat(length)}\n\n[a]: https://a.dev`;
+  it("reads a long line with a bracket that never closes, or a label defined on every line, in time that grows with the file", () => {
+    // 320 KB: a search that tried every split of such a line took over a minute; the same label defined
+    // again on every line copied a growing list each time and took seconds
+    for (const source of [`[${"a ".repeat(160_000)}\n\nx [${"a".repeat(320_000)}\n\n[a]: https://a.dev`, `[a]\n\n${"[a]: x\n".repeat(50_000)}`]) {
       const blocks = parseMarkdown(source, 0, true);
       const start = performance.now();
       readReferenceLinks(blocks);
-      return performance.now() - start;
-    });
-    expect(times[2]!).toBeLessThan(1_000);
+      expect(performance.now() - start).toBeLessThan(1_000);
+    }
   });
 
   it("draws only links to an address on screen, and changes nothing else (generated documents)", () => {

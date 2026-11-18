@@ -18,20 +18,26 @@ import { parseInline, shownText, type InlineNode, type MarkdownBlock } from "../
  *   colon (text shaped as a definition, which links nothing).
  */
 export function readReferenceLinks(blocks: MarkdownBlock[]): MarkdownBlock[] {
-  const read = new Map<string, Array<LinkNode | null>>();
+  // every line shaped as a definition counts, read or not: a label written so twice defines nothing
+  const read = new Map<string, { link: LinkNode | null; twice: boolean }>();
+  const definitionLines = new Set<InlineNode[]>();
   for (const block of blocks) {
     if (block.type !== "paragraph") continue;
     for (const line of block.lines) {
       const found = definition(line);
       if (found === null) break;
-      read.set(found.label, [...(read.get(found.label) ?? []), found.link]);
+      definitionLines.add(line);
+      const known = read.get(found.label);
+      read.set(found.label, known === undefined ? { link: found.link, twice: false } : { ...known, twice: true });
     }
   }
-  const definitions = new Map([...read].flatMap(([label, [link, ...more]]) => link !== null && link !== undefined && more.length === 0 ? [[label, link] as const] : []));
+  const definitions = new Map([...read].flatMap(([label, { link, twice }]) => link !== null && !twice ? [[label, link] as const] : []));
   if (definitions.size === 0) return blocks;
 
   const resolved = new Map<InlineNode[], InlineNode[]>();
   for (const line of runs(blocks)) {
+    // a definition's own line is drawn as written, so the address a reference goes to stays on it
+    if (definitionLines.has(line)) continue;
     const drawn = resolveLine(line, definitions);
     if (drawn !== null) resolved.set(line, drawn);
   }
@@ -43,26 +49,39 @@ type LinkNode = Extract<InlineNode, { type: "link" }>;
 // at most 999 characters, as CommonMark: a longer run is no label, and the search stays linear on a line
 // with a `[` that never closes
 const LABEL = String.raw`\[(?!\^)([^[\]\n]{1,999})\]`;
-const REFERENCE = new RegExp(String.raw`${LABEL}(?:\[([^[\]\n]*)\])?`, "g");
+// a shortcut's words are its label: past 999 characters it names no definition
+const REFERENCE = new RegExp(String.raw`\[(?!\^)([^[\]\n]+)\](?:\[([^[\]\n]{0,999})\])?`, "gu");
 const COLON = /[ \t]*:/y;
-const CLOSES_ACROSS = new RegExp(String.raw`^\]${LABEL.slice(0, -2)}\]`);
-const DEFINITION = new RegExp(String.raw`^ {0,3}${LABEL}:[ \t]+(?:<([^\s<>]+)>|([^\s<>]+))((?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?)[ \t]*$`);
+const CLOSES_ACROSS = new RegExp(String.raw`^\]${LABEL.slice(0, -2)}\]`, "u");
+const SHAPED = new RegExp(String.raw`^ {0,3}${LABEL}:`, "u");
+const DEFINITION = new RegExp(String.raw`^ {0,3}${LABEL}:[ \t]+(?:<([^\s<>[\]]+)>|([^\s<>[\]]+))((?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?)[ \t]*$`, "u");
 
 function normalLabel(label: string): string {
   return label.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
 /**
- * A definition line's label, and the link the inline reader makes of its address (null: no web
- * address). Only a line of plain text and autolinks is read, so its address and title are as written.
+ * A line shaped as a definition (`[label]:` first): its label, and the link the inline reader makes
+ * of its address, or null when it has no web address, or holds markup, a bracket or anything but
+ * an address and a title (read only as written).
  */
 function definition(line: InlineNode[]): { label: string; link: LinkNode | null } | null {
-  if (!line.every((node) => node.type === "text" || autolink(node))) return null;
-  const match = DEFINITION.exec(shownText(line) ?? "");
-  const label = match === null ? "" : normalLabel(match[1]!);
-  if (match === null || label === "") return null;
-  const [made, ...more] = parseInline(`[x](${match[2] ?? match[3]}${match[4]})`);
+  const shaped = SHAPED.exec(words(line));
+  const label = shaped === null ? "" : normalLabel(shaped[1]!);
+  if (label === "") return null;
+  const match = line.every((node) => node.type === "text" || autolink(node)) ? DEFINITION.exec(shownText(line) ?? "") : null;
+  const [made, ...more] = match === null ? [] : parseInline(`[x](${match[2] ?? match[3]}${match[4]})`);
   return { label, link: more.length === 0 && made?.type === "link" ? made : null };
+}
+
+function words(nodes: InlineNode[]): string {
+  return nodes.map((node) => {
+    switch (node.type) {
+      case "text": case "code": case "math": return node.value;
+      case "strong": case "em": case "del": case "link": case "file": return words(node.children);
+      case "image": return node.alt;
+    }
+  }).join("");
 }
 
 /** A link whose words are its own address (`https://x.dev`, `www.x.dev`), as the inline reader draws one. */
@@ -113,10 +132,10 @@ function resolveLine(line: InlineNode[], definitions: ReadonlyMap<string, LinkNo
     const match = close === -1 || closer.value.lastIndexOf("[", close) !== -1 ? null : CLOSES_ACROSS.exec(closer.value.slice(close));
     const target = match === null ? undefined : definitions.get(normalLabel(match[1]!));
     const end = offsets.get(closer)! + close + (match?.[0].length ?? 0);
-    if (match === null || target === undefined || !closes(end, false)) return null;
+    const opening = value.slice(open + 1);
+    if (match === null || target === undefined || opening.startsWith("^") || !closes(end, false)) return null;
     resolvedEnd = end;
-    const words = value.slice(open + 1);
-    const children: InlineNode[] = [...(words === "" ? [] : [{ type: "text" as const, value: words }]), ...nodes.slice(k + 1, j), ...(close === 0 ? [] : [{ type: "text" as const, value: closer.value.slice(0, close) }])];
+    const children: InlineNode[] = [...(opening === "" ? [] : [{ type: "text" as const, value: opening }]), ...nodes.slice(k + 1, j), ...(close === 0 ? [] : [{ type: "text" as const, value: closer.value.slice(0, close) }])];
     return { link: linkTo(target, children), closer: j, rest: closer.value.slice(close + match[0].length), restAt: end };
   };
   const resolve = (nodes: InlineNode[]): InlineNode[] => {
