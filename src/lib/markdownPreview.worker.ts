@@ -1,7 +1,7 @@
 // Parses a Markdown file for the viewer's Preview off the page (src/lib/markdownPreview.ts): an
 // input the parser handles slowly stalls this worker, which is ended past its budget, never the tab.
 import { parseMarkdown, type MarkdownBlock } from "../../shared/markdown.ts";
-import { readReferenceLinks } from "../../shared/markdownReferences.ts";
+import { readReferenceLinks } from "./markdownReferences.ts";
 import { serveOffThread } from "./offThread.ts";
 import { PREVIEW_ELEMENT_LIMIT, previewElements } from "./textPreview.ts";
 

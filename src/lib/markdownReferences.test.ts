@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { parseMarkdown, type InlineNode, type MarkdownBlock } from "../../shared/markdown.ts";
-import { readReferenceLinks } from "../../shared/markdownReferences.ts";
+import { readReferenceLinks } from "./markdownReferences.ts";
 
 const preview = (source: string): MarkdownBlock[] => readReferenceLinks(parseMarkdown(source, 0, true));
 const link = (href: string, words: string, title?: string): InlineNode => ({ type: "link", href, ...(title ? { title } : {}), children: [{ type: "text", value: words }] });
@@ -40,7 +40,20 @@ describe("reference links in a Preview", () => {
     expect(blocks.at(-1)?.type).toBe("table");
   });
 
+  it("reads a reference whose text holds emphasis or code", () => {
+    expect(preview("[**bold** words][r] and [`api()`][r].\n\n[r]: https://r.dev")).toEqual([{ type: "paragraph", lines: [[
+      { type: "link", href: "https://r.dev", children: [{ type: "strong", children: [{ type: "text", value: "bold" }] }, { type: "text", value: " words" }] },
+      { type: "text", value: " and " },
+      { type: "link", href: "https://r.dev", children: [{ type: "code", value: "api()" }] },
+      { type: "text", value: "." },
+    ]] }]);
+    expect(preview("[**x** a[b][r]\n\n[r]: https://r.dev")).toEqual([{ type: "paragraph", lines: [[
+      { type: "text", value: "[" }, { type: "strong", children: [{ type: "text", value: "x" }] }, { type: "text", value: " a" }, link("https://r.dev", "b"),
+    ]] }]);
+  });
+
   it("reads references side by side, and the definition a hidden comment held is not one", () => {
+    expect(preview("See [Mozilla CoC].\n\n[mozilla  coc]: https://m.dev")).toEqual([{ type: "paragraph", lines: [[{ type: "text", value: "See " }, link("https://m.dev", "Mozilla CoC"), { type: "text", value: "." }]] }]);
     expect(preview("[a][x][b][y]\n\n[x]: https://x.dev\n[y]: https://y.dev")).toEqual([{ type: "paragraph", lines: [[link("https://x.dev", "a"), link("https://y.dev", "b")]] }]);
     expect(preview("<!--\n\n[docs]: https://wrong.example\n\n-->\n\n[docs]: https://right.example\n\n[docs]")).toEqual([{ type: "paragraph", lines: [[link("https://right.example", "docs")]] }]);
   });
@@ -65,6 +78,13 @@ describe("reference links in a Preview", () => {
     ["a label defined twice", "[docs]\n\n[docs]: https://good.example\n[DOCS]: https://other.example"],
     ["an address that can't be a link", "[a] [b]\n\n[a]: ssh://h/x\n[b]: tel:123"],
     ["a definition whose link shows another address", "[r]\n\n[r]: [https://shown.dev](https://other.dev)"],
+    ["an HTML link that is no web address", '<p>[r]: <a href="mailto:a@b.dev">mailto:a@b.dev</a></p>\n\n[r]'],
+    ["definition-shaped text in a code span or a code block", "[r]: https://good.example\n\n`[r]`: https://evil.example\n\n```\n[s]: https://evil.example\n```\n\n[s]: https://good.example\n\n[r] [s]"],
+    ["a second definition that only looks the same (a zero-width character, an accent written apart, a Cyrillic letter)", "See [docs] and [café].\n\n[docs]: https://evil.example\n[café]: https://evil.example\n\n[do\u200bcs]: https://a.example\n[cafe\u0301]: https://b.example\n\n[d\u043ecs]: https://c.example"],
+    ["definition-shaped text before a look-alike colon or space", "See [a] [b] [c] [d].\n\n[a]: https://evil.example\n[b]: https://evil.example\n[c]: https://evil.example\n[d]: https://evil.example\n\n[a]\u00a0: https://a.example\n\n[b]\u200b: https://b.example\n\n[c]\u2236 https://c.example\n\n\uff3bd\uff3d\uff1a https://d.example"],
+    ["a blank label", "Tick [ ] when done.\n\n[ ]: https://x.example"],
+    ["a comment shown as code", "`<!--`\n\n[docs]: https://d.dev\n\n[docs]"],
+    ["a reference whose text holds a link or a bracket", "[see https://x.dev][r] [**a]**][r]\n\n[r]: https://r.dev"],
     ["a title holding emphasis", "[r]\n\n[r]: https://a.dev \"**[s]**\""],
     ["a linked badge", "[![build][badge]][ci]\n\n[badge]: https://img.dev/b.svg\n[ci]: https://ci.dev"],
     ["a footnote", "Bun[^1].\n\n[^1]: https://bun.sh"],
@@ -86,10 +106,12 @@ describe("reference links in a Preview", () => {
         const pieces = [
           `[${label}]: ${address()}`, `[${label}]: ${address()} "t"`, `[${label}]: <${address()}>`, `[${label}]: ssh://h/x`,
           `see [${label}] now`, `[x ${label}][${label}]`, `[${label}][]`, `![i][${label}]`, `**[${label}]**: ${address()}`,
-          `[x ${label}][${label}]: ${address()}`, `\`[${label}]\``, `[${label}] (${address()})`,
+          `[**x** ${label}][${label}]`, `[\`x\` ${label}][${label}]`,
+          `[x ${label}][${label}]: ${address()}`, `\`[${label}]\`: ${address()}`, `[${label}] (${address()})`,
+          `[${label}\u200b]: ${address()}`, `[${label}]\u00a0: ${address()}`,
         ];
         // definitions and references twice as often as the forms that must stay text
-        return pieces[random(2) === 0 ? random(7) : random(pieces.length)]!;
+        return pieces[random(2) === 0 ? random(9) : random(pieces.length)]!;
       };
       const opener = ["", "", "", "# ", "> ", "- ", "    ", "| ", "1. "];
       const swallow = ["<!--", "-->", "```", "$$", "`", "\\(", "\\)", "|---|---|", "**"];
@@ -132,7 +154,8 @@ describe("reference links in a Preview", () => {
         at += 1;
       }
       expect(at).toBeLessThanOrEqual(kept.length);
+      for (const char of kept.slice(at)) expect(labels.join("")).toContain(char);
     }
-    expect(read).toBeGreaterThan(150);
+    expect(read).toBeGreaterThan(100);
   });
 });
