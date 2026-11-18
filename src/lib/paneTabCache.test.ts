@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { cachedPaneCells, visitPaneTab } from "./paneTabCache.ts";
+import { cachedPaneCells, orderedPaneCells, visitPaneTab } from "./paneTabCache.ts";
 
 describe("pane tab cache", () => {
   const liveTabs = new Set(["a", "b", "c", "d", "e"]);
@@ -27,5 +27,13 @@ describe("pane tab cache", () => {
     const second = visitPaneTab([], "c", liveTabs);
     expect(first).toEqual(["a", "b"]);
     expect(second).toEqual(["c"]);
+  });
+  it("keeps every mounted pane where it already was, so switching a tab moves no frame", () => {
+    const cell = (paneId: string) => ({ paneId });
+    // t2 presented after t1: the presented pane comes first in the mount list, yet stays second in the DOM
+    expect(orderedPaneCells(["t1", "t2"], [cell("t2"), cell("t1")]).map((item) => item.paneId)).toEqual(["t1", "t2"]);
+    // a first render, and a new pane, keep the mount list's own order
+    expect(orderedPaneCells([], [cell("t2"), cell("t1")]).map((item) => item.paneId)).toEqual(["t2", "t1"]);
+    expect(orderedPaneCells(["t1", "t2"], [cell("t3"), cell("t2")]).map((item) => item.paneId)).toEqual(["t2", "t3"]);
   });
 });

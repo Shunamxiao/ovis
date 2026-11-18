@@ -17,3 +17,15 @@ export function cachedPaneCells(
     return cachedTabs.has(pane.tab_id) && !shownIds.has(pane.pane_id) && cell ? [cell] : [];
   });
 }
+
+/**
+ * The order panes keep in the canvas: a keyed child that changes rank is moved in the DOM by React,
+ * and moving a frame resets the scrollTop of everything it scrolls (the chat view lands on its
+ * oldest row), so each mounted pane holds the place it had last render. A new pane goes last and a
+ * closed one drops out; sorting is stable, so two new panes keep their own order.
+ */
+export function orderedPaneCells<T extends { readonly paneId: string }>(previous: readonly string[], cells: readonly T[]): T[] {
+  const rank = new Map(previous.map((id, index) => [id, index]));
+  const last = Number.MAX_SAFE_INTEGER;
+  return [...cells].sort((a, b) => (rank.get(a.paneId) ?? last) - (rank.get(b.paneId) ?? last));
+}
