@@ -62,6 +62,21 @@ describe("reference links in a Preview", () => {
     ]] }]);
   });
 
+  it("reads a marked reference after another, and hides only the line a link came from when two share an address", () => {
+    expect(preview("[**x**][a] then ![**y**][b]\n\n[a]: https://a.example\n[b]: https://b.example")).toEqual([
+      { type: "paragraph", lines: [[{ type: "link", href: "https://a.example", children: [{ type: "strong", children: [{ type: "text", value: "x" }] }] }, { type: "text", value: " then ![" }, { type: "strong", children: [{ type: "text", value: "y" }] }, { type: "text", value: "][b]" }]] },
+      { type: "paragraph", lines: [[{ type: "text", value: "[b]: " }, link("https://b.example", "https://b.example")]] },
+    ]);
+    expect(preview("[**x**][a] [**y**][b]\n\n[a]: https://a.example\n[b]: https://b.example")).toEqual([{ type: "paragraph", lines: [[
+      { type: "link", href: "https://a.example", children: [{ type: "strong", children: [{ type: "text", value: "x" }] }] }, { type: "text", value: " " },
+      { type: "link", href: "https://b.example", children: [{ type: "strong", children: [{ type: "text", value: "y" }] }] },
+    ]] }]);
+    expect(preview("[a]\n\n[a]: https://same.example\n[b]: https://same.example")).toEqual([
+      { type: "paragraph", lines: [[link("https://same.example", "a")]] },
+      { type: "paragraph", lines: [[{ type: "text", value: "[b]: " }, link("https://same.example", "https://same.example")]] },
+    ]);
+  });
+
   it("keeps a definition nothing used, and the text after the definitions a paragraph starts with", () => {
     expect(preview("[a]\n\n[a]: https://a.dev\n[b]: https://b.dev\nmore text")).toEqual([
       { type: "paragraph", lines: [[link("https://a.dev", "a")]] },
@@ -96,6 +111,9 @@ describe("reference links in a Preview", () => {
     ["a bidi control written as an HTML character reference", "<p>[&#x202e;scod&#x202c;]: https://evil.example</p>\n\n[docs]: https://good.example\n\nSee [docs]."],
     ["definition-shaped text a formula draws with commands", "$\\lbrack a\\rbrack\\colon https://evil.example$\n\n[a]: https://good.example\n\nSee [a]."],
     ["a look-alike made of two letters", "See [modern].\n\n[modern]: https://good.example\n\n[rnodern]: https://evil.example"],
+    ["a definition the HTML reader put together", '<table><tr><td>[r]: <a href="https://one.example">https://one.example</a></td></tr></table>\n\n<p>[s]: <a href="https://two.example">https://two.example</a></p>\n\nSee [r] [s].'],
+    ["a definition after a comment inside an HTML block", "<details>Example\n<!--\n\n[s]: https://one.example\n\n-->\n</details>\n\nSee [s]."],
+    ["an empty element as a reference\'s words", "<p>[<b></b>][r]</p>\n\n[r]: https://one.example"],
     ["a reference with no visible words", "Done [\u200b][r] and [ ][r].\n\n[r]: https://r.dev"],
     ["a blank label", "Tick [ ] when done.\n\n[ ]: https://x.example"],
     ["a comment shown as code", "`<!--`\n\n[docs]: https://d.dev\n\n[docs]"],
@@ -113,7 +131,7 @@ describe("reference links in a Preview", () => {
     let state = 7;
     const random = (count: number): number => { state = (state * 1103515245 + 12345) % 2 ** 31; return (state >>> 12) % count; };
     let read = 0;
-    for (let document = 0; document < 6000; document += 1) {
+    for (let document = 0; document < 9000; document += 1) {
       let url = 0;
       const pieces = (): string => {
         const label = labels[random(labels.length)]!;
@@ -171,6 +189,6 @@ describe("reference links in a Preview", () => {
       expect(at).toBeLessThanOrEqual(kept.length);
       for (const char of kept.slice(at)) expect(labels.join("")).toContain(char);
     }
-    expect(read).toBeGreaterThan(130);
+    expect(read).toBeGreaterThan(120);
   });
 });

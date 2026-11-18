@@ -39,13 +39,15 @@ export function readReferenceLinks(blocks: MarkdownBlock[], source: string): Mar
     }
   }
 
+  // a definition is a line the file holds as drawn, never one the HTML reader put together
+  const sourceLines = new Set(source.replace(/\r\n?/g, "\n").split("\n").map((line) => line.trimEnd()));
   const definitions = new Map<string, Definition>();
   const definitionLines = new Set<InlineNode[]>();
   blocks.forEach((block, blockIndex) => {
     if (block.type !== "paragraph") return;
     for (const [lineIndex, line] of block.lines.entries()) {
       const read = definition(line);
-      if (read === null) break;
+      if (read === null || !sourceLines.has(drawn(line).text.trimEnd())) break;
       definitionLines.add(line);
       const key = labelKey(folded(read.label));
       if (key !== "" && written.get(key) === 1) definitions.set(normalLabel(read.label), { ...read, blockIndex, lineIndex });
