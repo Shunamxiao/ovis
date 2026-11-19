@@ -28,12 +28,20 @@ describe("pane tab cache", () => {
     expect(first).toEqual(["a", "b"]);
     expect(second).toEqual(["c"]);
   });
-  it("keeps every mounted pane where it already was, so switching a tab moves no frame", () => {
+  it("keeps a mounted pane's place on a tab switch, and follows the layout among the drawn frames", () => {
     const cell = (paneId: string) => ({ paneId });
-    // t2 presented after t1: the presented pane comes first in the mount list, yet stays second in the DOM
-    expect(orderedPaneCells(["t1", "t2"], [cell("t2"), cell("t1")]).map((item) => item.paneId)).toEqual(["t1", "t2"]);
-    // a first render, and a new pane, keep the mount list's own order
-    expect(orderedPaneCells([], [cell("t2"), cell("t1")]).map((item) => item.paneId)).toEqual(["t2", "t1"]);
-    expect(orderedPaneCells(["t1", "t2"], [cell("t3"), cell("t2")]).map((item) => item.paneId)).toEqual(["t2", "t3"]);
+    const ids = (cells: { paneId: string }[]) => cells.map((item) => item.paneId);
+    // t2 presented after t1: t2 is drawn and t1 is cached, so t2 goes last instead of moving t1
+    expect(ids(orderedPaneCells(["t1"], [cell("t2"), cell("t1")], new Set(["t2"])))).toEqual(["t1", "t2"]);
+    // coming back: t1 is drawn in its own place and the cached t2 stays where it was
+    expect(ids(orderedPaneCells(["t1", "t2"], [cell("t1"), cell("t2")], new Set(["t1"])))).toEqual(["t1", "t2"]);
+    // a first render keeps the mount list's own order
+    expect(ids(orderedPaneCells([], [cell("t2"), cell("t1")], new Set(["t2", "t1"])))).toEqual(["t2", "t1"]);
+    // a split adds its pane last, moving nothing that is already mounted
+    expect(ids(orderedPaneCells(["t1"], [cell("t1"), cell("t4")], new Set(["t1", "t4"])))).toEqual(["t1", "t4"]);
+    // a split beside the first of two panes inserts the new frame between them, and moves neither
+    expect(ids(orderedPaneCells(["t1", "t2"], [cell("t1"), cell("t4"), cell("t2")], new Set(["t1", "t4", "t2"])))).toEqual(["t1", "t4", "t2"]);
+    // a swap exchanges the two drawn frames, so the Tab order follows the new left-to-right order
+    expect(ids(orderedPaneCells(["t1", "t2"], [cell("t2"), cell("t1")], new Set(["t1", "t2"])))).toEqual(["t2", "t1"]);
   });
 });

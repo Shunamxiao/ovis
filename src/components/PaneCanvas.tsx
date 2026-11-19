@@ -363,8 +363,8 @@ export function PaneCanvas({ snapshot, pane, selectedPaneId, onSelect, onChanged
     return !shownIds.has(id) && !cachedIds.has(id) && cell ? [{ ...cell, retained: true, cached: false }] : [];
   })];
   // React moves a keyed frame whose rank changes, and a moved frame loses the scroll of what it scrolls:
-  // the mounted panes keep the order they had, so switching tabs moves none of them
-  const mountedCells = orderedPaneCells(paneOrder.current, mounted);
+  // a pane keeps its place, and only the frames the tab draws follow the layout's own order
+  const mountedCells = orderedPaneCells(paneOrder.current, mounted, shownIds);
   paneOrder.current = mountedCells.map((cell) => cell.paneId);
   const mountedIds = new Set(mountedCells.map((cell) => cell.paneId));
   for (const id of lastCells.current.keys()) if (!mountedIds.has(id)) lastCells.current.delete(id);
