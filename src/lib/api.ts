@@ -11,7 +11,7 @@ import type { SystemReport } from "../../shared/system.ts";
 import type { MovePlanResponse, MoveStartRequest, MoveStopAllOffer, MoveStopAllRequest, MoveStopRequest } from "../../shared/runtime-move.ts";
 import type { EditableText, PaneDocuments, TextSaved, TextSaveRequest } from "../../shared/files.ts";
 import { parseSystemReport } from "./systemReport.ts";
-import { machinePath, type BridgeHealth, type HerdrCoreFacts, type HerdrIdentity, type HerdrRuntimeFacts, type Machine, type MachineRoster, type RuntimeName, type SetupAction, type SetupJob, type SetupRequest } from "../../shared/machines.ts";
+import { machinePath, type OwnJoinRequest, type BridgeHealth, type HerdrCoreFacts, type HerdrIdentity, type HerdrRuntimeFacts, type Machine, type MachineRoster, type PendingKey, type RuntimeName, type SetupAction, type SetupJob, type SetupRequest } from "../../shared/machines.ts";
 import type {
   WorkspaceMoved,
   HerdrPane,
@@ -285,22 +285,35 @@ export function fetchRelay(): Promise<RelayStatus> {
 export interface RelayOffer {
   readonly url: string;
   readonly expires_at: string;
+  /** asked for with `x-ovis-no-account-only`: the account named for the PC as it made this code. Absent from an older server */
+  readonly account?: string | null;
 }
 
 /**
  * The relay actions answer with the state they left the relay in, a refusal too: a start that
  * serve-only blocks is a 409 whose body is still the RelayStatus, so it is the answer, not an error.
  * Only a body without a phase (the origin gate, a watching device, an older server) is one.
+ * A start gives up after 20 s (the server starts the relay at once and answers), so one that never answers does not
+ * hold Turn on, or the setup guide's other ways. A stop or a reset may take the server longer, and is waited for.
  */
 export async function requestRelay(action: "start" | "stop" | "reset-identity"): Promise<RelayStatus> {
   const url = `/api/relay/${action}`;
-  const response = await apiFetch(url, { method: "POST", headers: { "x-herdr-update": "1" } });
-  if (!response.ok) {
-    const body: unknown = await response.clone().json().catch(() => null);
-    if (body !== null && typeof body === "object" && "phase" in body) return body as RelayStatus;
-    throw await errorFrom(url, response);
-  }
-  return (await response.json()) as RelayStatus;
+  const bounded = new AbortController();
+  // kept here too: Safari before 15.4 has no signal.reason
+  let gaveUp: DOMException | null = null;
+  const timer = action === "start" ? setTimeout(() => { gaveUp = new DOMException(t("No answer"), "TimeoutError"); bounded.abort(gaveUp); }, 20_000) : undefined;
+  try {
+    const response = await apiFetch(url, { method: "POST", headers: { "x-herdr-update": "1" }, signal: bounded.signal });
+    if (!response.ok) {
+      const body: unknown = await response.clone().json().catch(() => null);
+      if (body !== null && typeof body === "object" && "phase" in body) return body as RelayStatus;
+      throw await errorFrom(url, response);
+    }
+    return (await response.json()) as RelayStatus;
+  } catch (error) {
+    // a browser may answer the abort with its own words (Safari 14): the deadline's are ours
+    throw gaveUp ?? error;
+  } finally { clearTimeout(timer); }
 }
 
 /** POST /api/relay/direct: whether paired phones may connect straight to this PC on its networks while the relay is on. */
@@ -310,7 +323,8 @@ export function requestRelayDirect(on: boolean): Promise<RelayStatus> {
 
 /**
  * `noAccountOnly`: the offer is to put this PC in an account (the relay tab's QR code). The PC then makes it only while
- * it is in no account, answers 409 `in_account` once it is in one, and ends the offer's code when it joins one.
+ * it is in no account, answers 409 `in_account` once it is in one, and ends the offer's code when it joins one. It
+ * makes none before an account is named for it either (409 `no_account_named`; RelayStatus `account_named`).
  */
 export function requestRelayOffer({ noAccountOnly = false }: { noAccountOnly?: boolean } = {}): Promise<RelayOffer> {
   return getJson<RelayOffer>("/api/relay/offer", { method: "POST", headers: { "x-herdr-update": "1", ...(noAccountOnly ? { "x-ovis-no-account-only": "1" } : {}) } });
@@ -345,12 +359,30 @@ export function closeRelayLink(): Promise<{ readonly ok: true }> {
   return getJson<{ readonly ok: true }>("/api/relay/link/close", { method: "POST", headers: { "x-herdr-update": "1" } });
 }
 
+/** GET /api/relay/joins: account joins waiting for this PC's own window, without their digits (403 `own_window_required` elsewhere). */
+export async function fetchOwnJoins(): Promise<OwnJoinRequest[]> {
+  return (await getJson<{ readonly joins: OwnJoinRequest[] }>("/api/relay/joins")).joins;
+}
+
+/** POST /api/relay/join: the digits the new device shows, typed on this PC's own window; 409 `wrong_digits` ends that join. */
+export async function approveOwnJoin(id: string, digits: string): Promise<void> {
+  await getJson<{ readonly ok: true }>("/api/relay/join", { method: "POST", headers: { "content-type": "application/json", "x-herdr-update": "1" }, body: JSON.stringify({ id, digits }) });
+}
+
 /** POST /api/relay/pairing: the owner's answer to a phone waiting with the same digits (`relay-pairings` events). */
 export async function decideRelayPairing(id: string, decision: "approve" | "decline", digits?: string): Promise<void> {
   const url = "/api/relay/pairing";
   // an account member approving through the relay names the digits it picked (docs/account.md, "Who may admit a device")
   const response = await apiFetch(url, { method: "POST", headers: { "content-type": "application/json", "x-herdr-update": "1" }, body: JSON.stringify({ id, decision, ...(digits === undefined ? {} : { digits }) }) });
   if (!response.ok) throw await errorFrom(url, response);
+}
+
+/** Declines one device waiting for this PC's screen (S2-34, T72); the PC answers the list that is left. Approving stays on the screen. */
+export async function declinePendingKey(id: string): Promise<readonly PendingKey[]> {
+  const url = "/api/devices/pending/decline";
+  const response = await apiFetch(url, { method: "POST", headers: { "content-type": "application/json", "x-herdr-machine": "1" }, body: JSON.stringify({ id }) });
+  if (!response.ok) throw await errorFrom(url, response);
+  return ((await response.json()) as { pending: PendingKey[] }).pending;
 }
 
 export async function fetchPreferences(): Promise<SharedPreferences | null> {
@@ -1420,6 +1452,17 @@ export async function machineRequest<T>(path: string, method = "GET", body?: unk
   if (!response.ok) throw await errorFrom("/api/machines", response);
   return response.json();
 }
+/**
+ * Asks the server to try a PC it is waiting to reconnect now: any read of a PC it has no connection to does
+ * (machine-api.ts `retryNow`), and only then; it leaves a connected PC and one a setup holds alone. The answer is
+ * that PC's roster or `machine_offline`, both expected; what the try finds arrives as the PC's next state.
+ */
+export async function askMachineRetry(id: string): Promise<void> {
+  const url = `/api/machines/${encodeURIComponent(id)}/session`;
+  const response = await apiFetch(url);
+  if (!response.ok && response.status !== 503) throw await errorFrom(url, response);
+  await response.body?.cancel();
+}
 export interface SshCandidate {
   readonly name: string; readonly destination: string; readonly detail: string | null; readonly source: "ssh_config" | "tailscale";
   readonly tailnet?: string;
@@ -1428,6 +1471,8 @@ export const findSshCandidates = () => machineRequest<{ pcs: SshCandidate[] }>("
 /** A PC of this PC's Tailscale login whose Ovis lets this PC in as its owner (server/tailnet-pcs.ts); `outdated`: older than 0.5. */
 export interface TailnetPc { readonly name: string; readonly url: string; readonly relay: string | null; readonly outdated: boolean }
 export const findTailnetPcs = () => machineRequest<{ pcs: TailnetPc[] }>("/tailnet");
+/** POST /api/machines/address: pairs with another PC's Ovis at that https address by the six-digit code it shows, and adds it. */
+export const addAddressPc = (address: string, code: string) => machineRequest<{ machine: Machine }>("/address", "POST", { address, code });
 /** Another PC of the account as the page read it from the account's directory: its key checked against its id here too. */
 export interface AccountPcEntry { readonly server_id: string; readonly server_public_key: string; readonly relay: string; readonly name: string }
 export type AccountPcState = "ready" | "outdated" | "offline";
