@@ -32,15 +32,22 @@ const look = (page: Page, paneId: string) => page.evaluate((id) => {
   };
 }, paneId);
 
-/** The row the view starts with, which is what a reader reads from when they come back. */
-const topRow = (page: Page, paneId: string) => page.evaluate((id) => {
-  const view = document.querySelector<HTMLElement>(`.pane-frame[data-layout-pane="${CSS.escape(id)}"] .chat-view`)!;
-  const box = view.getBoundingClientRect();
-  const rows = [...view.querySelectorAll<HTMLElement>("[data-chat-row]")]
-    .filter((row) => row.getBoundingClientRect().bottom > box.top)
-    .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
-  return rows[0]?.getAttribute("data-chat-row") ?? null;
-}, paneId);
+/** The row the view starts with, which is what a reader reads from when they come back: the first
+ * row on the screen, waited for so a list still filling in never reads as no row. */
+const topRow = async (page: Page, paneId: string): Promise<string> => {
+  const handle = await page.waitForFunction((id) => {
+    const view = document.querySelector<HTMLElement>(`.pane-frame[data-layout-pane="${CSS.escape(id)}"] .chat-view`);
+    if (view === null) return null;
+    const box = view.getBoundingClientRect();
+    const rows = [...view.querySelectorAll<HTMLElement>("[data-chat-row]")]
+      .filter((row) => { const rect = row.getBoundingClientRect(); return rect.bottom > box.top && rect.top < box.bottom; })
+      .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+    return rows[0]?.getAttribute("data-chat-row") || null;
+  }, paneId, WAIT);
+  const row = await handle.jsonValue();
+  assert.ok(typeof row === "string" && row !== "", "a chat row is on the screen");
+  return row;
+};
 
 const scrollToPlace = (page: Page, paneId: string, fraction: number) => page.evaluate(({ id, share }) => {
   const view = document.querySelector<HTMLElement>(`.pane-frame[data-layout-pane="${CSS.escape(id)}"] .chat-view`)!;
@@ -65,6 +72,19 @@ async function watchMoves(page: Page): Promise<void> {
     (window as Window & MoveLog).moves = moves;
   });
 }
+
+/** The frames on the screen, in DOM order (the Tab order) and in left-to-right order. */
+const drawnOrder = (page: Page) => page.evaluate(() => {
+  const frames = [...document.querySelectorAll<HTMLElement>(".pane-frame:not(.is-hidden)")];
+  const id = (node: HTMLElement) => node.getAttribute("data-layout-pane");
+  return { dom: frames.map(id), visual: [...frames].sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left).map(id) };
+});
+
+const post = (page: Page, route: string, body: object): Promise<unknown> => page.evaluate(async ({ path, payload }) => {
+  const answer = await fetch(`/api/${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+  if (!answer.ok) throw new Error(`${path}: ${answer.status} ${await answer.text()}`);
+  return answer.json();
+}, { path: route, payload: body });
 
 const moves = (page: Page): Promise<string[] | undefined> => page.evaluate(() => (window as Window & MoveLog).moves);
 
@@ -147,6 +167,19 @@ try {
           assert.deepEqual(errors, []);
           console.log(`PASS ${face}: a tab switch keeps the reader's place in a chat (${before.scrollTop} → ${after.scrollTop}) and moves no pane frame`);
           if (viewport.width < 500) assert.ok(after.order.length === 3, `${face}: all three panes stay mounted on a phone`);
+          else {
+            // a swap in the tab on the screen reorders the frames it draws, so Tab follows the panes left to right
+            const made = await post(opened, "pane/split", { pane_id: PANE, direction: "right" }) as { pane: { pane_id: string } };
+            const split = made.pane.pane_id;
+            await opened.waitForFunction((ids) => ids.every((id) => document.querySelector(`.pane-frame[data-layout-pane="${CSS.escape(id)}"]:not(.is-hidden)`) !== null), [PANE, split], WAIT);
+            await post(opened, "pane/swap", { pane_id: PANE, target_pane_id: split });
+            await opened.waitForFunction(({ left, right }) => {
+              const x = (id: string) => document.querySelector(`.pane-frame[data-layout-pane="${CSS.escape(id)}"]`)?.getBoundingClientRect().left ?? Number.NaN;
+              return x(left) < x(right);
+            }, { left: split, right: PANE }, WAIT);
+            assert.deepEqual(await drawnOrder(opened), { dom: [split, PANE], visual: [split, PANE] }, `${face}: after a swap the drawn frames follow the panes left to right`);
+            console.log(`PASS ${face}: a swap reorders the drawn frames to the layout`);
+          }
         } finally { await context.close(); }
       }
     } finally { await browser.close(); }
