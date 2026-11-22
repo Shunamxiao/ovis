@@ -164,11 +164,21 @@ try {
           // the reader's place is kept: the row they were reading stays at the top of the view
           assert.ok(after.scrollTop! > 200, `${face}: not back at the oldest row (scrollTop ${after.scrollTop})`);
           assert.equal(await topRow(opened, PANE), topBefore, `${face}: the reader comes back to the row they left (${before.scrollTop} → ${after.scrollTop})`);
+          // main leaves this frame in place on the way back and moves the two others; one more trip moves
+          // this one there (it is no longer first among the mounted frames), so the place is checked again
+          await switchTo(opened, "probe2");
+          await switchTo(opened, "Idempotent");
+          const again = await look(opened, PANE);
+          assert.deepEqual(await moves(opened), [], `${face}: a second trip moves no pane frame either`);
+          assert.ok(Math.abs(again.scrollTop! - before.scrollTop!) <= 2, `${face}: the second trip keeps the scroll offset (${before.scrollTop} → ${again.scrollTop})`);
+          assert.equal(await topRow(opened, PANE), topBefore, `${face}: and the row the reader left`);
           assert.deepEqual(errors, []);
           console.log(`PASS ${face}: a tab switch keeps the reader's place in a chat (${before.scrollTop} → ${after.scrollTop}) and moves no pane frame`);
           if (viewport.width < 500) assert.ok(after.order.length === 3, `${face}: all three panes stay mounted on a phone`);
           else {
-            // a swap in the tab on the screen reorders the frames it draws, so Tab follows the panes left to right
+            // a swap in the tab on the screen reorders the frames it draws, so Tab follows the panes left to right;
+            // the two other tabs' frames stay mounted between them and must not be moved by it
+            await opened.evaluate(() => { (window as Window & MoveLog).moves!.length = 0; });
             const made = await post(opened, "pane/split", { pane_id: PANE, direction: "right" }) as { pane: { pane_id: string } };
             const split = made.pane.pane_id;
             await opened.waitForFunction((ids) => ids.every((id) => document.querySelector(`.pane-frame[data-layout-pane="${CSS.escape(id)}"]:not(.is-hidden)`) !== null), [PANE, split], WAIT);
@@ -178,6 +188,8 @@ try {
               return x(left) < x(right);
             }, { left: split, right: PANE }, WAIT);
             assert.deepEqual(await drawnOrder(opened), { dom: [split, PANE], visual: [split, PANE] }, `${face}: after a swap the drawn frames follow the panes left to right`);
+            const swapped = await moves(opened) ?? [];
+            assert.deepEqual(swapped.filter((id) => id !== PANE && id !== split), [], `${face}: the split and the swap move no frame of another tab (moved: ${swapped.join(", ")})`);
             console.log(`PASS ${face}: a swap reorders the drawn frames to the layout`);
           }
         } finally { await context.close(); }
