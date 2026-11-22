@@ -3155,10 +3155,11 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   its panes while away opens a replacement as view-only until the user returns.
   An automatic queue also retains its original pane lease until sent, discarded or held.
 - A mounted pane holds the frame it already has, and only the frames its tab draws take their order
-  from the layout (lib/paneTabCache.ts `orderedPaneCells`): an explicit swap exchanges the two
-  exchanged frames, since a swap reorders what is already drawn; a split inserts its pane at the
-  new pane's layout place without moving a sibling; a cached pane keeps its place; a tab switch
-  appends the presented frames and drops the closed ones. React moves a keyed child whose rank
+  from the layout (lib/paneTabCache.ts `orderedPaneCells`): an explicit swap moves one of the two
+  exchanged frames, since a swap reorders what is already drawn, and never a frame of another tab
+  mounted between them; a split inserts its pane at the new pane's layout place without moving a
+  sibling; a cached pane keeps its place; a tab switch appends the presented frames and drops the
+  closed ones. React moves a keyed child whose rank
   changed by re-inserting it, and a moved frame loses the `scrollTop` of everything it scrolls, the
   chat view included: reordering on every switch landed the chat of the tab being returned to on
   its oldest row and then restored the stored place, which read as a flash and a scroll from the
